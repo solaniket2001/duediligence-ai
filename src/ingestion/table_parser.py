@@ -5,6 +5,7 @@ import warnings
 import io
 import json
 import logging
+import re
 
 warnings.filterwarnings("ignore")
 
@@ -31,9 +32,17 @@ def clean_sec_table(df: pd.DataFrame) -> str:
         for i, val in enumerate(row_values):
             val = val.strip().replace('\n', ' ').replace('\r', '')
             
-            # 1. Header padding fix: Only pad if it's the very first row being processed
+            # 1. Header padding fix
             if i == 0 and not val and not raw_cleaned_rows:
                 val = "Metric/Region"
+                
+            # 2. Normalize SEC financial dashes to "0"
+            if val in ["—", "–", "-"]:
+                val = "0"
+                
+            # 3. NEW: Convert accounting parentheses to standard minus signs
+            # Safely extracts the number, turning "(6)" or "(6%)" into "-6" or "-6%"
+            val = re.sub(r'^\(([\d,\.]+)(%?)\)(%?)$', r'-\1\2\3', val)
                 
             if val:
                 if val == "$":
@@ -86,6 +95,13 @@ def extract_and_save_tables(filepath: Path, output_dir: Path):
     filing_type = filepath.parents[1].name
     ticker = filepath.parents[2].name
     
+    # NEW: Extract the year from the accession number format (CIK-YY-XXXXXX)
+    try:
+        year_suffix = accession_number.split('-')[1]
+        year = f"20{year_suffix}" if len(year_suffix) == 2 else "Unknown"
+    except IndexError:
+        year = "Unknown"
+    
     output_dir.mkdir(parents=True, exist_ok=True)
     
     with open(filepath, "r", encoding="utf-8") as file:
@@ -108,9 +124,10 @@ def extract_and_save_tables(filepath: Path, output_dir: Path):
                         valid_tables_found += 1
                         
                         payload = {
-                            "document_id": f"{ticker}_{filing_type}_{accession_number}",
+                            "document_id": f"{ticker}_{filing_type}_{year}_{accession_number}",
                             "ticker": ticker,
                             "filing_type": filing_type,
+                            "year": year, # NEW METADATA FIELD
                             "table_index": valid_tables_found,
                             "content": clean_markdown
                         }
