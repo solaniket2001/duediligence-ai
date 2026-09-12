@@ -4,18 +4,24 @@ import pandas as pd
 import warnings
 import io
 import json
+import logging
 
 warnings.filterwarnings("ignore")
 
+# 1. Configure Enterprise Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("table_parser")
+
 def clean_sec_table(df: pd.DataFrame) -> str:
-    """
-    Advanced data cleaning pipeline for SEC financial tables.
-    """
+    """Advanced data cleaning pipeline for SEC financial tables."""
     df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
     df = df.fillna("")
     
     raw_cleaned_rows = []
-    max_cols = 0
     
     for _, row in df.iterrows():
         row_values = row.astype(str).tolist()
@@ -25,6 +31,7 @@ def clean_sec_table(df: pd.DataFrame) -> str:
         for i, val in enumerate(row_values):
             val = val.strip().replace('\n', ' ').replace('\r', '')
             
+            # 1. Header padding fix: Only pad if it's the very first row being processed
             if i == 0 and not val and not raw_cleaned_rows:
                 val = "Metric/Region"
                 
@@ -38,27 +45,23 @@ def clean_sec_table(df: pd.DataFrame) -> str:
                     continue
 
                 if not deduped_row or val != deduped_row[-1]:
-                    if deduped_row and val == f"{deduped_row[-1]}.0":
-                        continue
-                    if deduped_row and deduped_row[-1] == f"{val}.0":
-                        deduped_row[-1] = f"{pending_prefix}{val}"
-                        pending_prefix = ""
-                        continue
+                    if deduped_row:
+                        # 2. Float Fix: Strip prefix symbols for accurate float comparison
+                        prev_clean = deduped_row[-1].replace("$", "")
+                        if val == f"{prev_clean}.0":
+                            continue
+                        if prev_clean == f"{val}.0":
+                            deduped_row[-1] = f"{pending_prefix}{val}"
+                            pending_prefix = ""
+                            continue
                         
                     deduped_row.append(f"{pending_prefix}{val}")
                     pending_prefix = ""
                     
         if deduped_row:
             raw_cleaned_rows.append(deduped_row)
-            if len(deduped_row) > max_cols:
-                max_cols = len(deduped_row)
 
-    cleaned_rows = []
-    for idx, row in enumerate(raw_cleaned_rows):
-        if idx == 0 and len(row) == max_cols - 1:
-            row.insert(0, "Metric/Region")
-        cleaned_rows.append(" | ".join(row))
-        
+    cleaned_rows = [" | ".join(row) for row in raw_cleaned_rows]
     return "\n".join(cleaned_rows)
 
 def is_core_financial_table(df: pd.DataFrame) -> bool:
@@ -77,21 +80,19 @@ def is_core_financial_table(df: pd.DataFrame) -> bool:
     return False
 
 def extract_and_save_tables(filepath: Path, output_dir: Path):
-    print(f"[*] Processing SEC submission: {filepath.name}")
+    logger.info(f"Processing SEC submission: {filepath.name}")
     
-    # Extract metadata directly from the folder structure
-    # Path format: data/raw/sec-edgar-filings/AAPL/10-K/0000320193-25-000079/full-submission.txt
     accession_number = filepath.parent.name
     filing_type = filepath.parents[1].name
     ticker = filepath.parents[2].name
     
-    # Ensure the output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
     
     with open(filepath, "r", encoding="utf-8") as file:
         soup = BeautifulSoup(file.read(), "lxml")
     
     html_tables = soup.find_all("table")
+    logger.info(f"Found {len(html_tables)} total tables. Executing semantic filtering...")
     valid_tables_found = 0
     
     for index, table in enumerate(html_tables):
@@ -106,7 +107,6 @@ def extract_and_save_tables(filepath: Path, output_dir: Path):
                     if len(clean_markdown.strip()) > 0:
                         valid_tables_found += 1
                         
-                        # Create the metadata-enriched JSON payload
                         payload = {
                             "document_id": f"{ticker}_{filing_type}_{accession_number}",
                             "ticker": ticker,
@@ -115,23 +115,24 @@ def extract_and_save_tables(filepath: Path, output_dir: Path):
                             "content": clean_markdown
                         }
                         
-                        # Save to data/processed directory
                         output_filename = f"{ticker}_{filing_type}_table_{valid_tables_found}.json"
                         output_path = output_dir / output_filename
                         
                         with open(output_path, "w", encoding="utf-8") as json_file:
                             json.dump(payload, json_file, indent=4)
                             
-                        print(f"[✓] Saved {output_filename} to {output_dir}")
+                        logger.info(f"Saved {output_filename} to {output_dir}")
                         
-                        # Stop after finding the first 3 CORE financial statements
                         if valid_tables_found >= 3:
                             break
                             
-        except ValueError:
+        except ValueError as e:
+            # We use logger.debug here so it doesn't clutter the terminal, 
+            # but is still available if we need to investigate parsing failures.
+            logger.debug(f"Skipping unparseable table {index}: {e}")
             continue
             
-    print(f"\n[+] Extraction complete. {valid_tables_found} tables saved.")
+    logger.info(f"Extraction complete. {valid_tables_found} core tables processed and saved.")
 
 if __name__ == "__main__":
     test_file = Path("data/raw/sec-edgar-filings/AAPL/10-K/0000320193-25-000079/full-submission.txt")
@@ -140,4 +141,4 @@ if __name__ == "__main__":
     if test_file.exists():
         extract_and_save_tables(test_file, processed_dir)
     else:
-        print("File not found. Please verify the file path.")
+        logger.error(f"File not found: {test_file}. Please verify the file path.")
