@@ -2,6 +2,8 @@ import logging
 from pathlib import Path
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
 from flashrank import Ranker, RerankRequest
 
 logging.basicConfig(
@@ -16,7 +18,10 @@ class SECRetriever:
         if not persist_dir.exists():
             raise FileNotFoundError(f"ChromaDB not found at {persist_dir}")
         
-        logger.info("Initializing Dense Embeddings Engine (Stage 1)...")
+        # ---------------------------------------------------------
+        # TOWER 1: DENSE VECTOR ENGINE (Semantic Meaning)
+        # ---------------------------------------------------------
+        logger.info("Initializing Dense Embeddings Engine...")
         self.embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         
         self.vector_store = Chroma(
@@ -24,86 +29,95 @@ class SECRetriever:
             embedding_function=self.embeddings
         )
         
-        logger.info("Initializing FlashRank Cross-Encoder (Stage 2)...")
+        # ---------------------------------------------------------
+        # TOWER 2: SPARSE BM25 ENGINE (Exact Keyword Matching)
+        # ---------------------------------------------------------
+        logger.info("Initializing BM25 Sparse Engine...")
+        # Pull the raw documents directly from Chroma to ensure perfectly synced data
+        db_data = self.vector_store.get(include=['documents', 'metadatas'])
+        self.all_documents = [
+            Document(page_content=doc, metadata=meta) 
+            for doc, meta in zip(db_data['documents'], db_data['metadatas'])
+        ]
+        
+        if self.all_documents:
+            self.bm25 = BM25Retriever.from_documents(self.all_documents)
+            self.bm25.k = 5
+        else:
+            self.bm25 = None
+            
+        # ---------------------------------------------------------
+        # THE JUDGE: CROSS-ENCODER RERANKER
+        # ---------------------------------------------------------
+        logger.info("Initializing FlashRank Cross-Encoder...")
         self.ranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir="/tmp")
 
     def search(self, query: str, top_k: int = 5, rerank_top_k: int = 1, metadata_filter: dict = None, score_cliff: float = 0.15):
         logger.info(f"Query: '{query}'")
         
-        # STAGE 1: Dense Retrieval (Fetch top 5 candidates)
-        initial_results = self.vector_store.similarity_search_with_relevance_scores(
-            query, 
-            k=top_k,
-            filter=metadata_filter
-        )
+        # Format Chroma Filter for multi-key queries
+        chroma_filter = None
+        if metadata_filter:
+            if len(metadata_filter) > 1:
+                chroma_filter = {"$and": [{k: v} for k, v in metadata_filter.items()]}
+            else:
+                chroma_filter = metadata_filter
+
+        # TOWER 1: Execute Dense Search
+        dense_docs = self.vector_store.similarity_search(query, k=top_k, filter=chroma_filter)
         
-        if not initial_results:
-            logger.warning("No semantic matches found.")
+        # TOWER 2: Execute Sparse Search
+        sparse_docs = self.bm25.invoke(query) if self.bm25 else []
+        
+        # Manually enforce metadata filters on the BM25 results
+        if metadata_filter:
+            filtered_sparse = []
+            for doc in sparse_docs:
+                match = True
+                for k, v in metadata_filter.items():
+                    if doc.metadata.get(k) != v:
+                        match = False
+                        break
+                if match:
+                    filtered_sparse.append(doc)
+            sparse_docs = filtered_sparse
+            
+        # MERGER: Combine and Deduplicate hits based on document_id
+        unique_docs = {}
+        for doc in dense_docs + sparse_docs:
+            doc_id = doc.metadata.get("document_id")
+            if doc_id not in unique_docs:
+                unique_docs[doc_id] = doc
+                
+        combined_results = list(unique_docs.values())
+        logger.info(f"Hybrid Search merged {len(dense_docs)} dense + {len(sparse_docs)} sparse hits into {len(combined_results)} unique candidates.")
+        
+        if not combined_results:
+            logger.warning("No matches found in Hybrid Search.")
             return []
             
-        logger.info(f"Stage 1 returned {len(initial_results)} candidates. Passing to Cross-Encoder...")
-        
-        # Format candidates for FlashRank
+        # THE JUDGE: Cross-Encoder Reranking
         passages = []
-        for idx, (doc, _) in enumerate(initial_results):
+        for idx, doc in enumerate(combined_results):
             passages.append({
                 "id": str(idx),
                 "text": doc.page_content,
                 "meta": doc.metadata
             })
             
-        # STAGE 2: Cross-Encoder Reranking
         rerank_request = RerankRequest(query=query, passages=passages)
         reranked_results = self.ranker.rerank(rerank_request)
         
         if not reranked_results:
             return []
             
-        # THE FIX: Adaptive Score Cliff Detection
+        # Adaptive Score Cliffing
         top_score = reranked_results[0]['score']
         logger.info(f"Cross-Encoder Top Score was: {top_score:.4f}")
         
         final_results = []
         for res in reranked_results:
-            # We keep the chunk ONLY if it is mathematically close to the top result
             if (top_score - res['score']) <= score_cliff:
                 final_results.append(res)
                 
-        final_results = final_results[:rerank_top_k]
-        
-        if not final_results:
-            logger.warning("Matches found, but rejected by score cliff detection.")
-            
-        return final_results
-
-if __name__ == "__main__":
-    CHROMA_DB_DIR = Path("data/chroma")
-    user_query = "What were the net sales and revenue for Apple's products like the iPhone, Mac, and iPad?"
-    
-    try:
-        retriever = SECRetriever(CHROMA_DB_DIR)
-        
-        # We explicitly filter for the year 2025 and use a 0.15 score cliff
-        results = retriever.search(
-            query=user_query,
-            top_k=5,
-            rerank_top_k=1,
-            metadata_filter={"year": "2025"},
-            score_cliff=0.15
-        )
-        
-        print("\n" + "="*60)
-        print("🎯 ENTERPRISE RERANKED RESULT 🎯")
-        print("="*60)
-        
-        for idx, res in enumerate(results):
-            meta = res['meta']
-            print(f"\nMatch {idx+1} | Confidence Score: {res['score']:.4f}")
-            print(f"Document ID: {meta.get('document_id')}")
-            print(f"Filing Type: {meta.get('filing_type')} | Year: {meta.get('year')}")
-            print("-" * 60)
-            print(res['text'])
-            print("-" * 60)
-            
-    except Exception as e:
-        logger.error(f"Retrieval failed: {e}")
+        return final_results[:rerank_top_k]

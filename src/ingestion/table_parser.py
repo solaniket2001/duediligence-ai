@@ -1,15 +1,12 @@
-from pathlib import Path
-from bs4 import BeautifulSoup
-import pandas as pd
-import warnings
+import os
+import re
 import io
 import json
 import logging
-import re
+from pathlib import Path
+from bs4 import BeautifulSoup
+import pandas as pd
 
-warnings.filterwarnings("ignore")
-
-# 1. Configure Enterprise Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -18,144 +15,107 @@ logging.basicConfig(
 logger = logging.getLogger("table_parser")
 
 def clean_sec_table(df: pd.DataFrame) -> str:
-    """Advanced data cleaning pipeline for SEC financial tables."""
-    df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
-    df = df.fillna("")
-    
-    raw_cleaned_rows = []
-    
+    cleaned_rows = []
     for _, row in df.iterrows():
-        row_values = row.astype(str).tolist()
-        deduped_row = []
-        pending_prefix = ""
-        
+        row_values = [str(val).strip() for val in row.values if pd.notna(val)]
+        processed_row = []
         for i, val in enumerate(row_values):
-            val = val.strip().replace('\n', ' ').replace('\r', '')
-            
-            # 1. Header padding fix
-            if i == 0 and not val and not raw_cleaned_rows:
+            val = val.replace('\n', ' ').replace('\r', '')
+            if i == 0 and not val and not cleaned_rows:
                 val = "Metric/Region"
-                
-            # 2. Normalize SEC financial dashes to "0"
             if val in ["—", "–", "-"]:
                 val = "0"
-                
-            # 3. NEW: Convert accounting parentheses to standard minus signs
-            # Safely extracts the number, turning "(6)" or "(6%)" into "-6" or "-6%"
+            # Normalize negative parentheses (6) -> -6
             val = re.sub(r'^\(([\d,\.]+)(%?)\)(%?)$', r'-\1\2\3', val)
-                
             if val:
-                if val == "$":
-                    pending_prefix = "$"
-                    continue
-                if val == "%":
-                    if deduped_row:
-                        deduped_row[-1] = f"{deduped_row[-1]}%"
-                    continue
-
-                if not deduped_row or val != deduped_row[-1]:
-                    if deduped_row:
-                        # 2. Float Fix: Strip prefix symbols for accurate float comparison
-                        prev_clean = deduped_row[-1].replace("$", "")
-                        if val == f"{prev_clean}.0":
-                            continue
-                        if prev_clean == f"{val}.0":
-                            deduped_row[-1] = f"{pending_prefix}{val}"
-                            pending_prefix = ""
-                            continue
-                        
-                    deduped_row.append(f"{pending_prefix}{val}")
-                    pending_prefix = ""
-                    
-        if deduped_row:
-            raw_cleaned_rows.append(deduped_row)
-
-    cleaned_rows = [" | ".join(row) for row in raw_cleaned_rows]
+                processed_row.append(val)
+        if len(processed_row) >= 2:
+            cleaned_rows.append(" | ".join(processed_row))
     return "\n".join(cleaned_rows)
 
-def is_core_financial_table(df: pd.DataFrame) -> bool:
-    """Evaluates semantic content to find core financial statements."""
-    text_dump = df.to_string().lower()
-    financial_keywords = [
-        "total net sales", "gross margin", "operating expenses", 
-        "net income", "total assets", "total liabilities", 
-        "cash equivalents", "retained earnings"
-    ]
-    has_keywords = any(keyword in text_dump for keyword in financial_keywords)
-    digit_count = sum(c.isdigit() for c in text_dump)
-    
-    if has_keywords and digit_count > 50:
-        return True
-    return False
+def extract_and_save_sec_data(filepath: Path, output_dir: Path):
+    if not filepath.exists():
+        logger.error(f"Filing not found at {filepath}")
+        return
 
-def extract_and_save_tables(filepath: Path, output_dir: Path):
     logger.info(f"Processing SEC submission: {filepath.name}")
-    
     accession_number = filepath.parent.name
     filing_type = filepath.parents[1].name
     ticker = filepath.parents[2].name
-    
-    # NEW: Extract the year from the accession number format (CIK-YY-XXXXXX)
+
     try:
         year_suffix = accession_number.split('-')[1]
-        year = f"20{year_suffix}" if len(year_suffix) == 2 else "Unknown"
+        year = f"20{year_suffix}" if len(year_suffix) == 2 else "2025"
     except IndexError:
-        year = "Unknown"
-    
+        year = "2025"
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    with open(filepath, "r", encoding="utf-8") as file:
-        soup = BeautifulSoup(file.read(), "lxml")
-    
-    html_tables = soup.find_all("table")
-    logger.info(f"Found {len(html_tables)} total tables. Executing semantic filtering...")
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # 1. EXTRACT FINANCIAL TABLES
+    tables = soup.find_all('table')
     valid_tables_found = 0
-    
-    for index, table in enumerate(html_tables):
-        try:
-            html_string = io.StringIO(str(table))
-            df = pd.read_html(html_string)[0]
-            
-            if df.shape[0] > 5 and df.shape[1] > 2:
-                if is_core_financial_table(df):
-                    clean_markdown = clean_sec_table(df)
-                    
-                    if len(clean_markdown.strip()) > 0:
+    keywords = ["iPhone", "Mac", "Services", "Americas", "Gross Margin", "Net sales", "Total net sales"]
+
+    for table in tables:
+        table_text = table.get_text()
+        matches = sum(1 for kw in keywords if kw.lower() in table_text.lower())
+        if matches >= 2:
+            try:
+                # Wrap HTML string in io.StringIO to satisfy modern Pandas
+                dfs = pd.read_html(io.StringIO(str(table)))
+                if dfs:
+                    df = dfs[0]
+                    clean_md = clean_sec_table(df)
+                    if len(clean_md.splitlines()) >= 3:
                         valid_tables_found += 1
-                        
                         payload = {
-                            "document_id": f"{ticker}_{filing_type}_{year}_{accession_number}",
+                            "document_id": f"{ticker}_{filing_type}_{year}_table_{valid_tables_found}",
                             "ticker": ticker,
                             "filing_type": filing_type,
-                            "year": year, # NEW METADATA FIELD
-                            "table_index": valid_tables_found,
-                            "content": clean_markdown
+                            "year": year,
+                            "chunk_type": "table",
+                            "content": clean_md
                         }
-                        
-                        output_filename = f"{ticker}_{filing_type}_table_{valid_tables_found}.json"
-                        output_path = output_dir / output_filename
-                        
-                        with open(output_path, "w", encoding="utf-8") as json_file:
-                            json.dump(payload, json_file, indent=4)
-                            
-                        logger.info(f"Saved {output_filename} to {output_dir}")
-                        
-                        if valid_tables_found >= 3:
-                            break
-                            
-        except ValueError as e:
-            # We use logger.debug here so it doesn't clutter the terminal, 
-            # but is still available if we need to investigate parsing failures.
-            logger.debug(f"Skipping unparseable table {index}: {e}")
-            continue
-            
-    logger.info(f"Extraction complete. {valid_tables_found} core tables processed and saved.")
+                        with open(output_dir / f"{payload['document_id']}.json", "w", encoding="utf-8") as out:
+                            json.dump(payload, out, indent=4)
+                        logger.info(f"Successfully saved table: {payload['document_id']}")
+            except Exception as e:
+                logger.debug(f"Table parse skipped: {e}")
+                continue
+
+    # 2. EXTRACT TARGETED RISK & BUSINESS DISCLOSURES
+    paragraphs = soup.find_all('p')
+    valid_texts_found = 0
+    seen_texts = set()
+    risk_markers = ["risk", "adversely", "competition", "regulatory", "supply chain", "economic conditions", "litigation"]
+
+    for p in paragraphs:
+        text = p.get_text(separator=' ', strip=True)
+        if 200 <= len(text) <= 2000 and text not in seen_texts:
+            if any(marker in text.lower() for marker in risk_markers):
+                seen_texts.add(text)
+                valid_texts_found += 1
+                payload = {
+                    "document_id": f"{ticker}_{filing_type}_{year}_text_{valid_texts_found}",
+                    "ticker": ticker,
+                    "filing_type": filing_type,
+                    "year": year,
+                    "chunk_type": "text",
+                    "content": text
+                }
+                with open(output_dir / f"{payload['document_id']}.json", "w", encoding="utf-8") as out:
+                    json.dump(payload, out, indent=4)
+                if valid_texts_found >= 30:
+                    break
+
+    logger.info(f"Extraction Complete: Saved {valid_tables_found} tables and {valid_texts_found} curated risk texts.")
 
 if __name__ == "__main__":
-    test_file = Path("data/raw/sec-edgar-filings/AAPL/10-K/0000320193-25-000079/full-submission.txt")
-    processed_dir = Path("data/processed")
-    
-    if test_file.exists():
-        extract_and_save_tables(test_file, processed_dir)
-    else:
-        logger.error(f"File not found: {test_file}. Please verify the file path.")
+    SEC_FILE = Path("data/raw/sec-edgar-filings/AAPL/10-K/0000320193-25-000079/full-submission.txt")
+    PROCESSED_DIR = Path("data/processed")
+    extract_and_save_sec_data(SEC_FILE, PROCESSED_DIR)
