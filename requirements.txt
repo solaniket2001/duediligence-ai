@@ -15,3 +15,4 @@ langchain-openai>=0.1.0
 langchain-chroma>=0.1.0
 python-dotenv>=1.0.1
 flashrank>=0.2.8
+langchain-groq>=0.1.0
