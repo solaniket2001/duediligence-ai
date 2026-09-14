@@ -10,8 +10,6 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Ensure Python can find our custom retriever module
-
 sys.path.append(os.getcwd())
 from src.retrieval.retriever import SECRetriever
 
@@ -22,12 +20,15 @@ load_dotenv()
 
 logger.info("Waking up AI Retrieval and Generation Engines...")
 retriever = SECRetriever(Path("data/chroma"))
+# Replace openai/gpt-oss-120b with the 128k versatile model:
 llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.0, max_tokens=2500)
 
-# 1.  Peer Tracking
-
+# ---------------------------------------------------------
+# DYNAMIC STATE SCHEMA
+# ---------------------------------------------------------
 class MemoState(TypedDict):
     company_name: str
+    ticker: str
     year: str
     peers: List[str]
     financial_data: str
@@ -35,40 +36,47 @@ class MemoState(TypedDict):
     peer_data: str
     final_memo: str
 
-# Helper to format context with explicit Citations
-
-def format_docs_with_citations(docs):
+def format_docs_with_citations(docs, max_chars_per_doc=1000):
     if not docs:
         return "No data found."
-    
-    # Extract data from the dictionary structure returned by FlashRank
     formatted_chunks = []
     for doc in docs:
-        # Access the dictionary keys: 'meta' and 'text'
         doc_id = doc.get("meta", {}).get("document_id", "Unknown")
-        content = doc.get("text", "")
+        content = doc.get("text", "")[:max_chars_per_doc]
         formatted_chunks.append(f"--- SOURCE ID: {doc_id} ---\n{content}")
-        
     return "\n\n".join(formatted_chunks)
 
-# 2. THE AGENTS
-
+# ---------------------------------------------------------
+# AGENTS WITH FINANCIAL-ALIGNED QUERIES
+# ---------------------------------------------------------
 def financial_analyst_agent(state: MemoState):
-    logger.info("Agent 1: Extracting Financial Data...")
+    logger.info(f"Agent 1: Extracting Financial Data for {state['company_name']} ({state['ticker']})...")
+    # Accounting-aligned query: targets standard SEC Income Statement headers
+    query = (
+        f"Consolidated Statements of Operations Net Sales Revenue "
+        f"Product breakdown by segment {state['company_name']} {state['ticker']}"
+    )
     docs = retriever.search(
-        query=f"What are the net sales, product breakdown, and revenue figures for {state['company_name']}?", 
-        top_k=5, rerank_top_k=2,
-        metadata_filter={"year": state["year"], "chunk_type": "table"},
+        query=query, 
+        top_k=5, 
+        rerank_top_k=1, 
+        metadata_filter={"chunk_type": "table"}, 
         score_cliff=0.15
     )
     return {"financial_data": format_docs_with_citations(docs)}
 
 def risk_analyst_agent(state: MemoState):
-    logger.info("Agent 2: Extracting Risk Factors...")
+    logger.info(f"Agent 2: Extracting Risk Factors for {state['company_name']}...")
+    # Legal-aligned query: targets Item 1A disclosures
+    query = (
+        f"Item 1A Risk Factors business risks regulatory legal competition "
+        f"market exposure {state['company_name']} {state['ticker']}"
+    )
     docs = retriever.search(
-        query=f"What are the primary business risks, regulatory challenges, and competition risks for {state['company_name']}?", 
-        top_k=5, rerank_top_k=3, 
-        metadata_filter={"year": state["year"], "chunk_type": "text"}, 
+        query=query, 
+        top_k=5, 
+        rerank_top_k=1, 
+        metadata_filter={"chunk_type": "text"}, 
         score_cliff=0.15
     )
     return {"risk_data": format_docs_with_citations(docs)}
@@ -80,41 +88,50 @@ def peer_analyst_agent(state: MemoState):
         
     peer_contexts = []
     for peer in state["peers"]:
+        query = f"Consolidated Statements of Operations Total Net Sales Revenue {peer}"
         docs = retriever.search(
-            query=f"What is the total revenue and net sales for {peer}?", 
-            top_k=3, rerank_top_k=1, 
-            metadata_filter={"year": state["year"], "chunk_type": "table"}
+            query=query, 
+            top_k=5, 
+            rerank_top_k=1, 
+            metadata_filter={"chunk_type": "table"},
+            score_cliff=0.15
         )
-        peer_contexts.append(f"PEER: {peer}\n" + format_docs_with_citations(docs))
+        peer_contexts.append(f"PEER [{peer}]:\n" + format_docs_with_citations(docs))
         
     return {"peer_data": "\n\n".join(peer_contexts)}
 
 def portfolio_manager_agent(state: MemoState):
-    logger.info("Agent 4: Synthesizing Enterprise Investment Memo...")
+    logger.info(f"Agent 4: Synthesizing Investment Memo for {state['company_name']}...")
     
+    # Fully dynamic system prompt with no hardcoded ticker names
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
-         "You are an elite Lead Portfolio Manager. Compile a formal Investment Memo using ONLY the subordinate agents' findings.\n\n"
-         "CRITICAL INSTRUCTION: You MUST cite the 'SOURCE ID' in brackets for every metric or risk factor you mention (e.g., [AAPL_10-K_2025_table_4]).\n\n"
-         "FINANCIAL DATA:\n{financial_data}\n\n"
-         "RISK FACTORS:\n{risk_data}\n\n"
-         "PEER COMPETITION DATA:\n{peer_data}\n\n"
-         "Format the memo with professional markdown, including an Executive Summary, Financial Performance, Peer Comparison, and Key Risks."),
-        ("human", "Write the investment memo for {company_name} ({year}).")
+         "You are an elite Lead Portfolio Manager compiling a formal Investment Memo.\n\n"
+         "STRICT RULES:\n"
+         "1. PROVENANCE: You MUST cite the exact 'SOURCE ID' in brackets for every financial figure or risk factor you cite (e.g., [{ticker}_10-K_2025_table_14]).\n"
+         "2. ZERO CROSS-CONTAMINATION: When reporting peer data, ONLY use data that originates from that peer's specific SOURCE ID. Never attribute {company_name}'s ({ticker}) metrics to a peer.\n"
+         "3. TRANSPARENCY: If peer data is not present in the provided context, explicitly state that filing data for the peer is unavailable rather than fabricating or substituting metrics.\n\n"
+         "FINANCIAL CONTEXT:\n{financial_data}\n\n"
+         "RISK FACTOR CONTEXT:\n{risk_data}\n\n"
+         "PEER COMPETITION CONTEXT:\n{peer_data}\n\n"
+         "Produce a structured memo with Executive Summary, Financial Performance, Peer Comparison, and Key Risks."),
+        ("human", "Compile the comprehensive investment memo for {company_name} ({ticker}) for fiscal year {year}.")
     ])
     
     chain = prompt | llm | StrOutputParser()
     memo = chain.invoke({
+        "company_name": state["company_name"],
+        "ticker": state["ticker"],
+        "year": state["year"],
         "financial_data": state["financial_data"],
         "risk_data": state["risk_data"],
-        "peer_data": state["peer_data"],
-        "company_name": state["company_name"],
-        "year": state["year"]
+        "peer_data": state["peer_data"]
     })
     return {"final_memo": memo}
 
-# 3. BUILD THE ASSEMBLY LINE
-
+# ---------------------------------------------------------
+# GRAPH PIPELINE ASSEMBLY
+# ---------------------------------------------------------
 def build_due_diligence_graph():
     workflow = StateGraph(MemoState)
     
@@ -134,21 +151,20 @@ def build_due_diligence_graph():
 if __name__ == "__main__":
     app = build_due_diligence_graph()
     
-    # We initialize the state with Microsoft as a peer
-    inputs = {
+    # Fully dynamic parameter dictionary: easily driven by UI inputs
+    test_inputs = {
         "company_name": "Apple",
+        "ticker": "AAPL",
         "year": "2025",
-        "peers": ["Microsoft"], 
+        "peers": ["MSFT"],
         "financial_data": "",
         "risk_data": "",
         "peer_data": "",
         "final_memo": ""
     }
     
-    result = app.invoke(inputs)
-    
+    result = app.invoke(test_inputs)
     print("\n" + "="*80)
-    print("📝 ENTERPRISE INVESTMENT MEMO (WITH CITATIONS) 📝")
+    print("📝 GENERATED INVESTMENT MEMO")
     print("="*80)
     print(result["final_memo"])
-    print("="*80)

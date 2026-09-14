@@ -16,14 +16,14 @@ def ingest_new_ticker(ticker: str, filing_year: str = "2025"):
     
     # 1. SEC requires a user agent string (Company Name & Contact Email)
     # Using personal educational placeholder format required by SEC EDGAR API
-    dl = Downloader("HochschuleSchmalkalden", "student.aniket@hs-sm.de")
+    dl = Downloader("HochschuleSchmalkalden", "student.aniket@hs-sm.de","data/raw")
     
     raw_dir = Path("data/raw/sec-edgar-filings")
     
     # 2. Download the 10-K filing from SEC EDGAR
     logger.info(f"Querying SEC EDGAR database for {ticker} 10-K...")
     try:
-        dl.get("10-K", ticker.upper(), amount=1, download_details=True)
+        dl.get("10-K", ticker.upper(), limit=1, download_details=True)
     except Exception as e:
         logger.error(f"Failed to download filing from SEC: {e}")
         return False
