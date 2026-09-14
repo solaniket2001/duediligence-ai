@@ -24,9 +24,8 @@ if not os.getenv("GROQ_API_KEY"):
 def run_financial_analysis(query: str, year: str = "2025"):
     """Orchestrates the RAG pipeline: Retrieval + LLM Generation"""
     
-    # ---------------------------------------------------------
     # STAGE 1: RETRIEVAL (Phase 2)
-    # ---------------------------------------------------------
+    
     db_dir = Path("data/chroma")
     retriever = SECRetriever(db_dir)
     
@@ -46,11 +45,12 @@ def run_financial_analysis(query: str, year: str = "2025"):
     # Combine the retrieved tables into a single context string
     context = "\n\n".join([doc['text'] for doc in retrieved_docs])
     
-    # ---------------------------------------------------------
     # STAGE 2: GENERATION (Phase 3)
-    # ---------------------------------------------------------
+    
     logger.info("Initializing Groq AI Engine (Llama-3-70B)...")
+    
     # Temperature 0.0 forces strict, factual analysis without hallucination
+    
     llm = ChatGroq(
         model="openai/gpt-oss-120b",
         temperature=0.0, 
@@ -58,6 +58,7 @@ def run_financial_analysis(query: str, year: str = "2025"):
     )
     
     # Create the strict System Prompt
+    
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
          "You are an elite financial analyst. "
@@ -69,6 +70,7 @@ def run_financial_analysis(query: str, year: str = "2025"):
     ])
     
     # Build the LangChain Pipeline (LCEL)
+    
     chain = prompt | llm | StrOutputParser()
     
     logger.info("Generating financial analysis...")

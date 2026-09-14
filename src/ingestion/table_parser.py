@@ -57,6 +57,7 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path):
     soup = BeautifulSoup(html_content, 'html.parser')
 
     # 1. EXTRACT FINANCIAL TABLES
+    
     tables = soup.find_all('table')
     valid_tables_found = 0
     keywords = ["iPhone", "Mac", "Services", "Americas", "Gross Margin", "Net sales", "Total net sales"]
@@ -89,6 +90,7 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path):
                 continue
 
     # 2. EXTRACT TARGETED RISK & BUSINESS DISCLOSURES
+    
     paragraphs = soup.find_all('p')
     valid_texts_found = 0
     seen_texts = set()

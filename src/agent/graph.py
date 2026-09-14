@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # Ensure Python can find our custom retriever module
+
 sys.path.append(os.getcwd())
 from src.retrieval.retriever import SECRetriever
 
@@ -23,9 +24,8 @@ logger.info("Waking up AI Retrieval and Generation Engines...")
 retriever = SECRetriever(Path("data/chroma"))
 llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.0, max_tokens=2500)
 
-# ---------------------------------------------------------
-# 1. UPGRADED STATE (Added Peer Tracking)
-# ---------------------------------------------------------
+# 1.  Peer Tracking
+
 class MemoState(TypedDict):
     company_name: str
     year: str
@@ -36,7 +36,7 @@ class MemoState(TypedDict):
     final_memo: str
 
 # Helper to format context with explicit Citations
-# Helper to format context with explicit Citations
+
 def format_docs_with_citations(docs):
     if not docs:
         return "No data found."
@@ -51,15 +51,14 @@ def format_docs_with_citations(docs):
         
     return "\n\n".join(formatted_chunks)
 
-# ---------------------------------------------------------
 # 2. THE AGENTS
-# ---------------------------------------------------------
+
 def financial_analyst_agent(state: MemoState):
     logger.info("Agent 1: Extracting Financial Data...")
     docs = retriever.search(
         query=f"What are the net sales, product breakdown, and revenue figures for {state['company_name']}?", 
-        top_k=5, rerank_top_k=2, 
-        metadata_filter={"year": state["year"], "chunk_type": "table"}, 
+        top_k=5, rerank_top_k=2,
+        metadata_filter={"year": state["year"], "chunk_type": "table"},
         score_cliff=0.15
     )
     return {"financial_data": format_docs_with_citations(docs)}
@@ -114,9 +113,8 @@ def portfolio_manager_agent(state: MemoState):
     })
     return {"final_memo": memo}
 
-# ---------------------------------------------------------
 # 3. BUILD THE ASSEMBLY LINE
-# ---------------------------------------------------------
+
 def build_due_diligence_graph():
     workflow = StateGraph(MemoState)
     

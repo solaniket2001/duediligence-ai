@@ -18,9 +18,8 @@ class SECRetriever:
         if not persist_dir.exists():
             raise FileNotFoundError(f"ChromaDB not found at {persist_dir}")
         
-        # ---------------------------------------------------------
         # TOWER 1: DENSE VECTOR ENGINE (Semantic Meaning)
-        # ---------------------------------------------------------
+        
         logger.info("Initializing Dense Embeddings Engine...")
         self.embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         
@@ -29,11 +28,12 @@ class SECRetriever:
             embedding_function=self.embeddings
         )
         
-        # ---------------------------------------------------------
         # TOWER 2: SPARSE BM25 ENGINE (Exact Keyword Matching)
-        # ---------------------------------------------------------
+        
         logger.info("Initializing BM25 Sparse Engine...")
+        
         # Pull the raw documents directly from Chroma to ensure perfectly synced data
+        
         db_data = self.vector_store.get(include=['documents', 'metadatas'])
         self.all_documents = [
             Document(page_content=doc, metadata=meta) 
@@ -46,9 +46,8 @@ class SECRetriever:
         else:
             self.bm25 = None
             
-        # ---------------------------------------------------------
         # THE JUDGE: CROSS-ENCODER RERANKER
-        # ---------------------------------------------------------
+        
         logger.info("Initializing FlashRank Cross-Encoder...")
         self.ranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir="/tmp")
 

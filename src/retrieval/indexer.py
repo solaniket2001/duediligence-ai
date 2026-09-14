@@ -7,6 +7,7 @@ from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_chroma import Chroma
 
 # Configure Enterprise Logging
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -42,6 +43,7 @@ def index_processed_data(processed_dir: Path, persist_dir: Path):
             logger.error(f"Failed to load {file_path.name}: {e}")
 
     # THE PIVOT: Local, free embeddings instead of OpenAI
+    
     logger.info("Initializing FastEmbed Embeddings (BAAI/bge-small-en-v1.5)...")
     embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
 
