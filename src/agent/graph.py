@@ -60,7 +60,7 @@ def financial_analyst_agent(state: MemoState):
         query=query, 
         top_k=5, 
         rerank_top_k=1, 
-        metadata_filter={"chunk_type": "table"}, 
+        metadata_filter={"chunk_type": "table", "ticker": state["ticker"]}, 
         score_cliff=0.15
     )
     return {"financial_data": format_docs_with_citations(docs)}
@@ -76,7 +76,7 @@ def risk_analyst_agent(state: MemoState):
         query=query, 
         top_k=5, 
         rerank_top_k=1, 
-        metadata_filter={"chunk_type": "text"}, 
+        metadata_filter={"chunk_type": "text", "ticker": state["ticker"]}, 
         score_cliff=0.15
     )
     return {"risk_data": format_docs_with_citations(docs)}
@@ -93,7 +93,7 @@ def peer_analyst_agent(state: MemoState):
             query=query, 
             top_k=5, 
             rerank_top_k=1, 
-            metadata_filter={"chunk_type": "table"},
+            metadata_filter={"chunk_type": "table", "ticker": peer},
             score_cliff=0.15
         )
         peer_contexts.append(f"PEER [{peer}]:\n" + format_docs_with_citations(docs))
