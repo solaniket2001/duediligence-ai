@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from typing import TypedDict, List
 
 from langgraph.graph import StateGraph, START, END
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -20,8 +20,8 @@ load_dotenv()
 
 logger.info("Waking up AI Retrieval and Generation Engines...")
 retriever = SECRetriever(Path("data/chroma"))
-# Replace openai/gpt-oss-120b with the 128k versatile model:
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.0, max_tokens=2500)
+#  Google api
+llm = ChatGoogleGenerativeAI( model="gemini-3.5-flash-lite", temperature=0.0, max_output_tokens=2500, max_retries=3 )
 
 # ---------------------------------------------------------
 # DYNAMIC STATE SCHEMA
@@ -36,7 +36,7 @@ class MemoState(TypedDict):
     peer_data: str
     final_memo: str
 
-def format_docs_with_citations(docs, max_chars_per_doc=1000):
+def format_docs_with_citations(docs, max_chars_per_doc=4000):
     if not docs:
         return "No data found."
     formatted_chunks = []
@@ -59,7 +59,7 @@ def financial_analyst_agent(state: MemoState):
     docs = retriever.search(
         query=query, 
         top_k=5, 
-        rerank_top_k=1, 
+        rerank_top_k=3, 
         metadata_filter={"chunk_type": "table", "ticker": state["ticker"]}, 
         score_cliff=0.15
     )
@@ -75,7 +75,7 @@ def risk_analyst_agent(state: MemoState):
     docs = retriever.search(
         query=query, 
         top_k=5, 
-        rerank_top_k=1, 
+        rerank_top_k=3, 
         metadata_filter={"chunk_type": "text", "ticker": state["ticker"]}, 
         score_cliff=0.15
     )
@@ -92,7 +92,7 @@ def peer_analyst_agent(state: MemoState):
         docs = retriever.search(
             query=query, 
             top_k=5, 
-            rerank_top_k=1, 
+            rerank_top_k=3, 
             metadata_filter={"chunk_type": "table", "ticker": peer},
             score_cliff=0.15
         )
