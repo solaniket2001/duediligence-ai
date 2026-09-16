@@ -84,13 +84,15 @@ if st.session_state.run_analysis:
         if peer_ticker and fetch_company_if_missing(peer_ticker, target_year):
             needs_indexing = True
             
+        # THE FIX: Always run the indexer if the database folder is missing!
+        if not os.path.exists("data/chroma"):
+            needs_indexing = True
+            
         if needs_indexing:
             with st.status("🧠 Chunking and generating ONNX vector embeddings...", expanded=True) as status:
                 subprocess.run(["python", "src/retrieval/indexer.py"], check=True)
                 status.update(label="Vector Database Updated Successfully!", state="complete", expanded=False)
             
-            # THE FIX: Tell Streamlit to drop everything, wipe its memory, and restart the page.
-            # Because run_analysis is True, it will skip downloading and jump straight to generation!
             st.rerun()
             
     except Exception as e:
@@ -114,12 +116,12 @@ if st.session_state.run_analysis:
         inputs = {
             "company_name": target_name,
             "ticker": target_ticker,
-            "year": target_year,
-            "peers": [peer_ticker] if peer_ticker else [], 
-            "financial_data": "",
-            "risk_data": "",
-            "peer_data": "",
-            "final_memo": ""
+            "peer_ticker": peer_ticker,
+            "peer_name": peer_name,
+            "financial_context": [],
+            "risk_context": [],
+            "peer_context": [],
+            "final_memo": "",
         }
         
         max_attempts = 3
