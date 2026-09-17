@@ -4,6 +4,7 @@ import sys
 import subprocess
 import time
 from dotenv import load_dotenv
+import requests
 
 sys.path.append(os.getcwd())
 from src.utils.ticker_resolver import resolve_ticker
@@ -21,7 +22,9 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("**System Architecture:**")
-    st.markdown("- **Entity Resolution:** Offline JSON Cache")
+    st.markdown("- **Frontend:** Streamlit Client")
+    st.markdown("- **Backend:** FastAPI Microservice (`localhost:8000`)")
+    st.markdown("- **Orchestration:** LangGraph Multi-Agent Engine")
     st.markdown("- **Retrieval:** Hybrid (ChromaDB + BM25)")
     st.markdown("- **LLM:** Gemini 3.5 Flash Lite")
     
@@ -34,24 +37,22 @@ def fetch_company_if_missing(ticker, year):
         with st.status(f"📥 Fetching official SEC EDGAR filings for {ticker}...", expanded=True) as status:
             subprocess.run(["python", "src/ingestion/fetcher.py", ticker, year], check=True)
             
-            # THE FIX: Check if the folder actually got created!
             if not os.path.exists(sec_path):
                 st.error(f"❌ SEC blocked the download for {ticker}. Halting to prevent infinite loop.")
-                st.stop() # This instantly kills the script so st.rerun() never happens
+                st.stop()
                 
             status.update(label=f"Downloaded raw filings for {ticker}!", state="complete", expanded=False)
         return True
     return False
 
-# Initialize Session State for automatic restarting
+# Initialize Session State for execution control
 if "run_analysis" not in st.session_state:
     st.session_state.run_analysis = False
 
-# Trigger the analysis either by button click or automatic restart
 if run_btn:
     st.session_state.run_analysis = True
 
-# Main View
+# Main Execution View
 if st.session_state.run_analysis:
     load_dotenv()
     if not os.getenv("GOOGLE_API_KEY"):
@@ -59,10 +60,10 @@ if st.session_state.run_analysis:
         st.session_state.run_analysis = False
         st.stop()
         
-    # 1. Resolve Entities Offline
+    # 1. Resolve Entities Offline for Ingestion Validation
     try:
         target_ticker, target_name = resolve_ticker(raw_target)
-        peer_ticker, peer_name = resolve_ticker(raw_peer)
+        peer_ticker, peer_name = resolve_ticker(raw_peer) if raw_peer.strip() else (None, None)
     except FileNotFoundError as e:
         st.error(str(e))
         st.session_state.run_analysis = False
@@ -75,7 +76,7 @@ if st.session_state.run_analysis:
         
     st.info(f"🔍 **Resolved Target:** {target_name} ({target_ticker}) | **Resolved Peer:** {peer_name} ({peer_ticker})")
     
-    # 2. Auto-Hydrate Vector Database (Batched)
+    # 2. Auto-Hydrate Vector Database (Batched JIT Ingestion)
     try:
         needs_indexing = False
         
@@ -84,7 +85,6 @@ if st.session_state.run_analysis:
         if peer_ticker and fetch_company_if_missing(peer_ticker, target_year):
             needs_indexing = True
             
-        # THE FIX: Always run the indexer if the database folder is missing!
         if not os.path.exists("data/chroma"):
             needs_indexing = True
             
@@ -100,37 +100,29 @@ if st.session_state.run_analysis:
         st.session_state.run_analysis = False
         st.stop()
         
-    # 3. Run the LangGraph Multi-Agent Engine
-    # Turn off the flag so it doesn't infinite loop when the app finishes
+    # 3. Request Analysis from FastAPI Backend
     st.session_state.run_analysis = False 
     
-    with st.spinner(f"Running Multi-Agent Analysis for {target_ticker}..."):
-        
-        # Dynamically import the graph only AFTER the memory is clear
-        if "src.agent.graph" in sys.modules:
-            del sys.modules["src.agent.graph"]
-        from src.agent.graph import build_due_diligence_graph
-        
-        app_graph = build_due_diligence_graph()
-        
-        inputs = {
-            "company_name": target_name,
-            "ticker": target_ticker,
-            "peer_ticker": peer_ticker,
-            "peer_name": peer_name,
-            "financial_context": [],
-            "risk_context": [],
-            "peer_context": [],
-            "final_memo": "",
+    with st.spinner(f"FastAPI microservice running multi-agent analysis for {target_ticker}..."):
+        payload = {
+            "target": raw_target,
+            "peer": raw_peer.strip() if raw_peer and raw_peer.strip() else None,
+            "target_year": str(target_year)
         }
         
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                result = app_graph.invoke(inputs)
+        try:
+            response = requests.post(
+                "http://localhost:8000/api/v1/analyze", 
+                json=payload,
+                timeout=180
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
                 st.success("Analysis Complete! Provenance citations are bracketed.")
-                # Escape dollar signs so Streamlit does not trigger LaTeX math mode
-                clean_memo = result["final_memo"].replace("$", r"\$")
+                
+                # Escape currency characters to prevent math rendering conflicts
+                clean_memo = data["memo_markdown"].replace("$", r"\$")
 
                 st.markdown("### 📝 Final Investment Memo")
                 st.markdown("---")
@@ -138,22 +130,21 @@ if st.session_state.run_analysis:
                 
                 st.download_button(
                     label="💾 Download Memo as Markdown file",
-                    data=result["final_memo"],
-                    file_name=f"{target_ticker}_Investment_Memo_FY{target_year}.md",
+                    data=data["memo_markdown"],
+                    file_name=f"{data['target_ticker']}_Investment_Memo_FY{target_year}.md",
                     mime="text/markdown",
                     use_container_width=True
                 )
-                break 
-                
-            except Exception as e:
-                error_msg = str(e)
-                if "503" in error_msg or "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                    if attempt < max_attempts - 1:
-                        st.warning(f"API Rate Limit hit. Cooling down for 35 seconds... (Attempt {attempt + 1} of {max_attempts})")
-                        time.sleep(35) 
-                    else:
-                        st.error("Google's API is currently overloaded. Please try again in a few minutes.")
-                        break
-                else:
-                    st.error(f"Pipeline Error: {e}")
-                    break
+            else:
+                error_detail = response.json().get("detail", response.text)
+                st.error(f"Backend Engine Error ({response.status_code}): {error_detail}")
+
+        except requests.exceptions.ConnectionError:
+            st.error(
+                "❌ Could not connect to FastAPI backend at `http://localhost:8000`. "
+                "Ensure the API server is running in a separate terminal via: `uvicorn src.api.server:app --reload`"
+            )
+        except requests.exceptions.Timeout:
+            st.error("⏱️ Request timed out. The backend took longer than 180 seconds to complete synthesis.")
+        except Exception as e:
+            st.error(f"Unexpected Client Error: {e}")

@@ -20,4 +20,6 @@ langgraph>=0.1.14
 rank_bm25>=0.2.2
 sec-edgar-downloader>=5.0.0
 langchain-google-genai>=0.1.0
-steamlit>=1.30.0
+streamlit>=1.30.0
+fastapi>=0.115.0
+uvicorn>=0.24.0
