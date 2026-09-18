@@ -23,3 +23,5 @@ langchain-google-genai>=0.1.0
 streamlit>=1.30.0
 fastapi>=0.115.0
 uvicorn>=0.24.0
+fpdf>=0.6.0
+markdown>=3.5.0
