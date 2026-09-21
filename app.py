@@ -1,224 +1,308 @@
-import streamlit as st
 import os
-import sys
-import subprocess
-import time
-from dotenv import load_dotenv
-import requests
-from pathlib import Path
-from fpdf import FPDF
-import markdown
 import re
+import json
+import requests
+import markdown
+from fpdf import FPDF, XPos, YPos
+import streamlit as st
+from dotenv import load_dotenv
 
-sys.path.append(os.getcwd())
-from src.utils.ticker_resolver import resolve_ticker
-# pdf helper class for downloading the memo as a PDF
+load_dotenv()
 
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Argus | Autonomous Due Diligence",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Markdown Sanitizer ---
+def clean_markdown_for_streamlit(text: str) -> str:
+    """Escapes currency dollar signs so Streamlit doesn't misinterpret them as LaTeX math delimiters."""
+    if not text:
+        return ""
+    # Replace stray backslashes before numbers or dollar signs (\4,355 -> $4,355)
+    cleaned = re.sub(r'\\+(\$?\d)', r'\1', text)
+    # Remove broken LaTeX \frac commands if any leaked through
+    cleaned = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1 / \2)', cleaned)
+    # Escape standalone dollar signs followed by a number (e.g. $94,827 -> \$94,827)
+    cleaned = re.sub(r'(?<!\\)\$(\d)', r'\\$\1', cleaned)
+    return cleaned
+
+# --- Glassmorphism & Bento Grid Styling ---
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+    }
+    
+    .stApp {
+        background: radial-gradient(circle at top right, #111827, #0b0f17 40%, #030712 100%);
+        color: #f3f4f6;
+    }
+
+    /* Bento Cards */
+    .bento-card {
+        background: rgba(17, 24, 39, 0.55);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 24px;
+        box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+        margin-bottom: 20px;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .bento-card:hover {
+        border-color: rgba(225, 29, 72, 0.4);
+    }
+
+    /* Metric & Tag Pills */
+    .metric-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 4px 12px;
+        border-radius: 9999px;
+        font-size: 0.78rem;
+        font-weight: 500;
+        color: #94a3b8;
+    }
+    .status-badge {
+        display: inline-block;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 600;
+    }
+    .badge-live {
+        background: rgba(16, 185, 129, 0.15);
+        color: #34d399;
+        border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .badge-score {
+        background: rgba(225, 29, 72, 0.15);
+        color: #fb7185;
+        border: 1px solid rgba(225, 29, 72, 0.3);
+    }
+
+    /* Primary Button */
+    div.stButton > button:first-child {
+        background: linear-gradient(135deg, #e11d48, #be123c);
+        color: #ffffff;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        padding: 10px 24px;
+        transition: all 0.2s ease;
+        box-shadow: 0 4px 15px rgba(225, 29, 72, 0.3);
+    }
+    div.stButton > button:first-child:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(225, 29, 72, 0.45);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- PDF Generation Pipeline ---
 class PDFMaker(FPDF):
-    def header(self):
-        self.set_font("Helvetica", "B", 12)
-        self.cell(0, 10, "Autonomous Financial Due Diligence Engine", border=False, ln=1, align="C")
-        self.ln(5)
-
     def footer(self):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
+        self.set_text_color(140, 140, 140)
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
-def generate_pdf(memo_text, target, peer):
-    """Converts the markdown memo to HTML and renders a polished PDF byte stream."""
+def generate_pdf(memo_text: str, target: str, peer: str) -> bytes:
     pdf = PDFMaker()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    
-    # Title Banner
+
+    # Header Title
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, f"Investment Memo: {target} vs {peer}", ln=True, align="L")
+    pdf.cell(0, 10, f"Investment Memo: {target} vs {peer or 'Independent'}", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
     pdf.ln(4)
-    
-    # 1. Fix smart quotes, em-dashes, and brute-force strip backslashes from dollar signs
+
+    # Sanitize characters for standard Helvetica font
     clean_text = memo_text.replace("’", "'").replace("‘", "'").replace('“', '"').replace('”', '"')
-    clean_text = clean_text.replace("—", "-").replace("–", "-") # Fix for the font error
+    clean_text = clean_text.replace("—", "-").replace("–", "-")
     clean_text = clean_text.replace("\\$", "$").replace("\\\\$", "$")
-    
-    # 2. Fix inline lists by ensuring a double newline before any asterisk bullet
+
+    # Format list items
     clean_text = re.sub(r"([A-Za-z0-9\]\.])\s+(\*\s+Item)", r"\1\n\n\2", clean_text)
-    
-    # Convert cleaned structured Markdown to HTML
+
+    # Markdown to HTML
     html_content = markdown.markdown(clean_text)
-    
-    # 3. Final safety net: catch any backslashes the markdown parser left behind
     html_content = html_content.replace("\\$", "$")
-    
-    # Render the HTML directly onto the PDF canvas
+
     pdf.write_html(html_content)
-    
     return bytes(pdf.output())
 
 
-# Configure Page
-st.set_page_config(page_title="Due Diligence AI", page_icon="🏦", layout="wide")
-st.title("🏦 Autonomous Financial Due Diligence Engine")
-
-# Sidebar Configuration
+# --- Sidebar Navigation & Input ---
 with st.sidebar:
-    st.header("Analysis Parameters")
-    raw_target = st.text_input("Target Company (Name or Ticker)", value="Tesla")
-    raw_peer = st.text_input("Peer Comparison (Name or Ticker)", value="Microsoft")
-    target_year = st.selectbox("Target Fiscal Year", options=["2025", "2024", "2023"])
-    filing_type = st.radio("Filing Type", options=["annual", "quarterly"], format_func=lambda x: "Annual (10-K / 20-F)" if x == "annual" else "Quarterly (10-Q)")
-    
+    st.markdown("### ⚡ Engine Config")
+    st.markdown("<p style='font-size:0.85rem; color:#94a3b8;'>Multi-agent SEC EDGAR hybrid evaluation pipeline with cyclic self-reflection.</p>", unsafe_allow_html=True)
+    st.divider()
+
+    target_ticker = st.text_input("Target Ticker", value="TSLA").upper().strip()
+    target_name = st.text_input("Target Name", value="Tesla, Inc.").strip()
+
     st.markdown("---")
-    st.markdown("**System Architecture:**")
-    st.markdown("- **Frontend:** Streamlit Client")
-    st.markdown("- **Backend:** FastAPI Microservice (`localhost:8000`)")
-    st.markdown("- **Orchestration:** LangGraph Multi-Agent Engine")
-    st.markdown("- **Retrieval:** Hybrid (ChromaDB + BM25)")
-    st.markdown("- **LLM:** Gemini 3.5 Flash Lite")
-    
-    run_btn = st.button("Generate Investment Memo", type="primary", use_container_width=True)
+    peer_ticker = st.text_input("Peer Ticker", value="MSFT").upper().strip()
+    peer_name = st.text_input("Peer Name", value="Microsoft Corporation").strip()
 
-from pathlib import Path  # <--- Make sure this is imported at the top of app.py!
-import os
-import subprocess
-import streamlit as st
+    st.divider()
+    use_api = st.checkbox("Connect via FastAPI (port 8000)", value=False)
+    execute_btn = st.button("Generate Due Diligence", use_container_width=True)
 
-def fetch_company_if_missing(ticker, year, filing_type):
-    """Downloads and parses SEC data if missing. Returns True if a download occurred."""
-    # We now check if the parsed JSON files exist, NOT the raw download folder
-    processed_files = list(Path("data/processed").glob(f"{ticker}_*.json"))
-    
-    if len(processed_files) == 0:
-        with st.status(f"📥 Fetching & parsing official SEC filings for {ticker}...", expanded=True) as status:
-            # Added filing_type to the subprocess list
-            subprocess.run(["python", "src/ingestion/fetcher.py", ticker, str(year), filing_type], check=True)
-            
-            # Verify it actually produced JSON files after running
-            if not list(Path("data/processed").glob(f"{ticker}_*.json")):
-                st.error(f"❌ SEC blocked the download for {ticker} or no filings exist. Halting to prevent infinite loop.")
-                st.stop()
-                
-            status.update(label=f"Parsed filings for {ticker}!", state="complete", expanded=False)
-        return True
-    return False
 
-# Initialize Session State for execution control
-if "run_analysis" not in st.session_state:
-    st.session_state.run_analysis = False
+# --- Dashboard Header ---
+st.markdown(f"""
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 24px;">
+    <div>
+        <h1 style="margin:0; font-size:2rem; font-weight:700; letter-spacing:-0.03em;">ARGUS // FINANCIAL INTELLIGENCE</h1>
+        <p style="margin:0; font-size:0.9rem; color:#94a3b8;">Autonomous SEC 10-K RAG • Quantitative Math Engine • Live Sentiment</p>
+    </div>
+    <div style="display:flex; gap:10px;">
+        <span class="status-badge badge-live">LIVE DDGS ACTIVE</span>
+        <span class="status-badge badge-score">HYDE ENABLED</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-if run_btn:
-    st.session_state.run_analysis = True
 
-# Main Execution View
-if st.session_state.run_analysis:
-    load_dotenv()
-    if not os.getenv("GOOGLE_API_KEY"):
-        st.error("Missing GOOGLE_API_KEY in .env file.")
-        st.session_state.run_analysis = False
-        st.stop()
-        
-    # 1. Resolve Entities Offline for Ingestion Validation
-    try:
-        target_ticker, target_name = resolve_ticker(raw_target)
-        peer_ticker, peer_name = resolve_ticker(raw_peer) if raw_peer.strip() else (None, None)
-    except FileNotFoundError as e:
-        st.error(str(e))
-        st.session_state.run_analysis = False
-        st.stop()
-    
-    if not target_ticker:
-        st.error(f"Could not find a valid SEC company for '{raw_target}'. Please check the spelling.")
-        st.session_state.run_analysis = False
-        st.stop()
-        
-    st.info(f"🔍 **Resolved Target:** {target_name} ({target_ticker}) | **Resolved Peer:** {peer_name} ({peer_ticker})")
-    
-    # 2. Auto-Hydrate Vector Database (Batched JIT Ingestion)
-    try:
-        needs_indexing = False
-        
-        if fetch_company_if_missing(target_ticker, target_year, filing_type):
-            needs_indexing = True
-        if peer_ticker and fetch_company_if_missing(peer_ticker, target_year, filing_type):
-            needs_indexing = True
-            
-        if not os.path.exists("data/chroma"):
-            needs_indexing = True
-            
-        if needs_indexing:
-            with st.status("🧠 Chunking and generating ONNX vector embeddings...", expanded=True) as status:
-                subprocess.run(["python", "src/retrieval/indexer.py"], check=True)
-                status.update(label="Vector Database Updated Successfully!", state="complete", expanded=False)
-            
-            st.rerun()
-            
-    except Exception as e:
-        st.error(f"Failed to ingest SEC data: {e}")
-        st.session_state.run_analysis = False
-        st.stop()
-        
-    # 3. Request Analysis from FastAPI Backend
-    st.session_state.run_analysis = False 
-    
-    with st.spinner(f"FastAPI microservice running multi-agent analysis for {target_ticker}..."):
-        payload = {
-            "target": raw_target,
-            "peer": raw_peer.strip() if raw_peer and raw_peer.strip() else None,
-            "target_year": str(target_year)
-        }
-        
+# --- Execution Controller ---
+if execute_btn:
+    payload = {
+        "ticker": target_ticker,
+        "company_name": target_name,
+        "peer_ticker": peer_ticker if peer_ticker else None,
+        "peer_name": peer_name if peer_name else None,
+    }
+
+    with st.status("Executing Multi-Agent Workflow...", expanded=True) as status:
+        st.write("🔍 Running HyDE & Multi-Tower Search...")
+        st.write("📊 Crunching Quantitative Ratios & YoY Margins...")
+        st.write("🌐 Scraping Live Financial News & Sentiment...")
+
         try:
-            response = requests.post(
-                "http://localhost:8000/api/v1/analyze", 
-                json=payload,
-                timeout=180
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                st.success("Analysis Complete! Provenance citations are bracketed.")
-                
-                # Escape currency characters to prevent math rendering conflicts
-                clean_memo = data["memo_markdown"].replace("$", r"\$")
-
-                st.markdown("### 📝 Final Investment Memo")
-                st.markdown("---")
-                st.markdown(clean_memo)
-                
-                # --- EXPORT BUTTONS ---
-                st.subheader("📥 Export Due Diligence Report")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Native Streamlit Markdown Download
-                    st.download_button(
-                        label="📄 Download as Markdown",
-                        data=clean_memo,  # Using your clean_memo variable
-                        file_name=f"{data['target_ticker']}_Investment_Memo_FY{target_year}.md",
-                        mime="text/markdown",
-                        use_container_width=True
-                    )
-                    
-                with col2:
-                    # FPDF Byte Stream Download
-                    pdf_bytes = generate_pdf(clean_memo, data['target_ticker'], peer_ticker)
-                    st.download_button(
-                        label="📕 Download as PDF",
-                        data=pdf_bytes,
-                        file_name=f"{data['target_ticker']}_vs_{peer_ticker}_Memo.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
+            if use_api:
+                res = requests.post("http://localhost:8000/api/analyze", json=payload, timeout=120)
+                data = res.json()
             else:
-                error_detail = response.json().get("detail", response.text)
-                st.error(f"Backend Engine Error ({response.status_code}): {error_detail}")
+                # Direct LangGraph Invocation
+                from src.agent.graph import build_due_diligence_graph, normalize_graph_input
+                graph = build_due_diligence_graph()
+                data = graph.invoke(normalize_graph_input(payload))
 
-        except requests.exceptions.ConnectionError:
-            st.error(
-                "❌ Could not connect to FastAPI backend at `http://localhost:8000`. "
-                "Ensure the API server is running in a separate terminal via: `uvicorn src.api.server:app --reload`"
-            )
-        except requests.exceptions.Timeout:
-            st.error("⏱️ Request timed out. The backend took longer than 180 seconds to complete synthesis.")
-        except Exception as e:
-            st.error(f"Unexpected Client Error: {e}")
+            st.session_state["analysis_data"] = data
+            status.update(label="Analysis Pipeline Complete", state="complete", expanded=False)
+        except Exception as err:
+            status.update(label=f"Execution Failed: {err}", state="error")
+            st.stop()
+
+
+# --- Main Bento Grid Display ---
+if "analysis_data" in st.session_state:
+    data = st.session_state["analysis_data"]
+
+    # Top Metric Bar
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(f"""
+        <div class="bento-card" style="padding:16px;">
+            <div style="font-size:0.75rem; color:#94a3b8;">TARGET ENTITY</div>
+            <div style="font-size:1.2rem; font-weight:700;">{data.get('company_name', target_name)}</div>
+            <span class="metric-pill" style="margin-top:6px;">{data.get('ticker', target_ticker)}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="bento-card" style="padding:16px;">
+            <div style="font-size:0.75rem; color:#94a3b8;">BENCHMARK PEER</div>
+            <div style="font-size:1.2rem; font-weight:700;">{data.get('peer_name') or 'N/A'}</div>
+            <span class="metric-pill" style="margin-top:6px;">{data.get('peer_ticker') or 'NONE'}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        score_val = data.get("financial_score", 0.0)
+        st.markdown(f"""
+        <div class="bento-card" style="padding:16px;">
+            <div style="font-size:0.75rem; color:#94a3b8;">RETRIEVAL CONFIDENCE</div>
+            <div style="font-size:1.2rem; font-weight:700; color:{'#34d399' if score_val >= 0.80 else '#fb7185'};">
+                {score_val:.4f}
+            </div>
+            <span class="metric-pill" style="margin-top:6px;">Threshold: 0.80</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""
+        <div class="bento-card" style="padding:16px;">
+            <div style="font-size:0.75rem; color:#94a3b8;">REFLECTION LOOPS</div>
+            <div style="font-size:1.2rem; font-weight:700;">{data.get('financial_retries', 0)}</div>
+            <span class="metric-pill" style="margin-top:6px;">Self-Correct Cycles</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Middle Row: Bento Intelligence Cards
+    grid_left, grid_right = st.columns([1, 1])
+
+    with grid_left:
+        st.markdown("""
+        <div class="bento-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h3 style="margin:0; font-size:1.1rem; font-weight:600;">📈 Quantitative Reasoning</h3>
+                <span class="status-badge badge-live">MATH AGENT</span>
+            </div>
+        """, unsafe_allow_html=True)
+        st.markdown(clean_markdown_for_streamlit(data.get("quantitative_analysis", "") or "No quantitative ratios derived."))
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with grid_right:
+        st.markdown("""
+        <div class="bento-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h3 style="margin:0; font-size:1.1rem; font-weight:600;">🌐 Live Market Outlook</h3>
+                <span class="status-badge badge-score">DDGS SENTIMENT</span>
+            </div>
+        """, unsafe_allow_html=True)
+        st.markdown(clean_markdown_for_streamlit(data.get("news_context", "") or "No real-time market news retrieved."))
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Bottom Row: Full Memo & PDF Export Action
+    st.markdown("""
+    <div class="bento-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h3 style="margin:0; font-size:1.25rem; font-weight:600;">📑 Executive Investment Memorandum</h3>
+        </div>
+    """, unsafe_allow_html=True)
+
+    memo_text = data.get("final_memo", "")
+    st.markdown(clean_markdown_for_streamlit(memo_text))
+
+    st.divider()
+
+    # Download Button
+    pdf_bytes = generate_pdf(
+        memo_text=memo_text,
+        target=data.get("ticker", target_ticker),
+        peer=data.get("peer_ticker", peer_ticker)
+    )
+
+    st.download_button(
+        label="📥 Download Institutional PDF Memo",
+        data=pdf_bytes,
+        file_name=f"{data.get('ticker')}_vs_{data.get('peer_ticker')}_Memo.pdf",
+        mime="application/pdf"
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)

@@ -25,3 +25,5 @@ fastapi>=0.115.0
 uvicorn>=0.24.0
 fpdf>=0.6.0
 markdown>=3.5.0
+duckduckgo-search>=0.1.0
+feedparser>=6.0.0
