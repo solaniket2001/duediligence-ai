@@ -142,6 +142,7 @@ def _is_hidden(element) -> bool:
 
 def _prepare_document(content: str):
     parser = html.HTMLParser(encoding="utf-8", recover=True, remove_comments=True)
+    if isinstance(content, str): content = content.encode('utf-8')
     root = html.fromstring(content, parser=parser)
     removable_names = {"head", "script", "style", "meta", "link", "ixheader", "header", "footer"}
     xbrl_names = {"nonfraction", "nonnumeric", "fraction", "continuation"}
