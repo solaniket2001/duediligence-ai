@@ -18,27 +18,76 @@ logger = logging.getLogger("table_parser")
 
 
 def clean_sec_table(df: pd.DataFrame) -> str:
+    if df.empty:
+        return ""
+        
+    # 1. Top-left cell padding
+    if pd.isna(df.iloc[0, 0]) or str(df.iloc[0, 0]).strip() == "":
+        df.iloc[0, 0] = "Metric/Region"
+        
     cleaned_rows = []
-    for _, row in df.iterrows():
-        values = []
-        for value in row.values:
-            if pd.isna(value):
+    
+    for i, row in df.iterrows():
+        cleaned_row = []
+        skip_next = False
+        
+        for j in range(len(row)):
+            if skip_next:
+                skip_next = False
                 continue
+                
+            val = str(row.iloc[j]).strip()
+            
+            # 2. Symbol merging (Merge stray $ or % with the next/previous number)
+            if val == "$" and j + 1 < len(row):
+                next_val = str(row.iloc[j+1]).strip()
+                cleaned_row.append(f"${next_val}")
+                skip_next = True
+            elif val == "%" and len(cleaned_row) > 0:
+                cleaned_row[-1] = f"{cleaned_row[-1]}%"
+            else:
+                cleaned_row.append(val)
+                
+        cleaned_rows.append(cleaned_row)
 
-            text = str(value).strip()
-            text = re.sub(r"\s+", " ", text)
-            text = text.replace("—", "0").replace("–", "0")
+    # 3. Deduplicate headers and data rows
+    final_rows = []
+    for i, row in enumerate(cleaned_rows):
+        seen = set()
+        deduped_row = []
+        
+        for col in row:
+            if not col: 
+                continue
+                
+            # Treat "100" and "100.0" as the same value to eliminate phantom floats
+            compare_val = col.replace(".0", "").replace("$", "")
+            
+            if compare_val not in seen:
+                deduped_row.append(col)
+                seen.add(compare_val)
+                
+        final_rows.append(" | ".join(deduped_row))
+            
+    return "\n".join(final_rows)
 
-            # Normalize negative values: (123) -> -123
-            text = re.sub(r"^\(([\d,.\-]+)(%?)\)(%?)$", r"-\1\2\3", text)
-
-            if text:
-                values.append(text)
-
-        if len(values) >= 2:
-            cleaned_rows.append(" | ".join(values))
-
-    return "\n".join(cleaned_rows)
+    # 3. Deduplicate headers (e.g., removing repeated "2025" or "Change")
+    final_rows = []
+    for i, row in enumerate(cleaned_rows):
+        if i == 0:  # Header row deduplication
+            seen = set()
+            deduped_header = []
+            for col in row:
+                if col and col not in seen:
+                    deduped_header.append(col)
+                    seen.add(col)
+            final_rows.append(" | ".join(deduped_header))
+        else:
+            # Filter out empty strings from data rows to match header alignment
+            data_row = [col for col in row if col]
+            final_rows.append(" | ".join(data_row))
+            
+    return "\n".join(final_rows)
 
 
 def _get_preceding_context(element) -> str:

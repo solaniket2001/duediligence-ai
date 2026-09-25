@@ -210,8 +210,11 @@ def discover_peer(state: DueDiligenceState) -> dict:
             response = llm.invoke([HumanMessage(content=prompt)])
             raw_text = extract_text_from_response(response.content)
             
-            # Extract clean alphanumeric ticker (1-5 chars)
-            match = re.search(r'\b[A-Z]{1,5}\b', raw_text.upper())
+            # Remove isolated "I" or "A" so they don't trigger the 1-5 letter regex
+            clean_text = re.sub(r'\b(I|A)\b', '', raw_text)
+            
+            # Search for consecutive uppercase letters in the ORIGINAL text
+            match = re.search(r'\b[A-Z]{1,5}\b', clean_text)
             resolved_ticker = match.group(0) if match else raw_text.strip().upper()
             
             logger.info("Resolved %s to ticker: %s", peer_name, resolved_ticker)
@@ -229,7 +232,12 @@ def discover_peer(state: DueDiligenceState) -> dict:
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         raw_text = extract_text_from_response(response.content)
-        match = re.search(r'\b[A-Z]{1,5}\b', raw_text.upper())
+        
+        # Remove isolated "I" or "A" so they don't trigger the 1-5 letter regex
+        clean_text = re.sub(r'\b(I|A)\b', '', raw_text)
+        
+        # Search for consecutive uppercase letters in the ORIGINAL text
+        match = re.search(r'\b[A-Z]{1,5}\b', clean_text)
         discovered_ticker = match.group(0) if match else raw_text.strip().upper()
         
         logger.info("Autonomous Agent selected peer: %s", discovered_ticker)

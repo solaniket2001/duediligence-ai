@@ -2,7 +2,7 @@ sec-edgar-downloader>=5.1.0
 pdfplumber>=0.11.0
 pandas>=2.2.0
 pydantic>=2.7.0
-python-dotenv>=1.0.0
+python-dotenv>=1.0.1
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 lxml-html-clean>=0.1.0
@@ -13,12 +13,10 @@ chromadb>=0.4.24
 langchain>=0.1.13
 langchain-openai>=0.1.0
 langchain-chroma>=0.1.0
-python-dotenv>=1.0.1
 flashrank>=0.2.8
 langchain-groq>=0.1.0
 langgraph>=0.1.14
 rank_bm25>=0.2.2
-sec-edgar-downloader>=5.0.0
 langchain-google-genai>=0.1.0
 streamlit>=1.30.0
 fastapi>=0.115.0
@@ -28,3 +26,9 @@ markdown>=3.5.0
 duckduckgo-search>=0.1.0
 feedparser>=6.0.0
 yfinance>=0.2.0
+sqlalchemy>=2.0.0
+langchain-community>=0.1.0
+fastembed
+psycopg2-binary
+asyncpg
+recharts>=0.1.0
