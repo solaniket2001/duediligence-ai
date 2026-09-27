@@ -1,5 +1,6 @@
 import os
 import logging
+import argparse
 from pathlib import Path
 from sec_edgar_downloader import Downloader
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -36,7 +37,11 @@ def download_filing(ticker: str, filing_type: str = "10-K", limit: int = 1) -> P
     return DATA_DIR
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Download SEC filings.")
+    parser.add_argument("--ticker", type=str, required=True, help="Ticker symbol to download")
+    args = parser.parse_args()
+
     try:
-        download_filing("AAPL", filing_type="10-K", limit=1)
+        download_filing(args.ticker.upper(), filing_type="10-K", limit=1)
     except Exception as e:
         logger.error(f"Failed to download SEC data after 3 attempts: {e}")
