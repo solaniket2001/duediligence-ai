@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Terminal,
   Loader2,
@@ -46,20 +46,16 @@ interface AnalysisResult {
 
 const parseQuantSections = (text: string, targetTicker: string, peerTicker?: string) => {
   if (!text) return { target: "", peer: "" };
-
   const peerKey = peerTicker ? `${peerTicker} Quantitative Analysis:` : "Peer Quantitative Analysis:";
   const targetKey = `${targetTicker} Quantitative Analysis:`;
-
   if (text.includes(peerKey)) {
     const parts = text.split(peerKey);
     const targetContent = parts[0].replace(targetKey, "").trim();
     const peerContent = parts[1]?.trim() || "";
     return { target: targetContent, peer: peerContent };
   }
-
   const targetMatch = text.match(/(?:1\.\s*Target Company|Target Company|###.*Target)([\s\S]*?)(?=2\.\s*Peer Company|Peer Company|###.*Peer|$)/i);
   const peerMatch = text.match(/(?:2\.\s*Peer Company|Peer Company|###.*Peer)([\s\S]*?)$/i);
-
   return {
     target: targetMatch ? targetMatch[1].trim() : text,
     peer: peerMatch ? peerMatch[1].trim() : "",
@@ -88,6 +84,16 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [data, setData] = useState<AnalysisResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [liveLogs, setLiveLogs] = useState<string[]>([]);
+  
+  // Auto-scroll reference for the terminal
+  const terminalEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (terminalEndRef.current) {
+      terminalEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [liveLogs]);
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,13 +102,13 @@ export default function Home() {
     setIsAnalyzing(true);
     setErrorMsg(null);
     setData(null);
+    setLiveLogs([]);
 
     try {
       const payload: Record<string, any> = {
         ticker: targetInput.trim(),
         company_name: targetInput.trim(),
       };
-
       if (peerInput.trim()) {
         payload.peer_ticker = peerInput.trim();
         payload.peer_name = peerInput.trim();
@@ -110,18 +116,52 @@ export default function Home() {
 
       const response = await fetch("http://127.0.0.1:8001/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        },
         body: JSON.stringify(payload),
       });
 
       if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+      if (!response.body) throw new Error("ReadableStream not supported by browser.");
 
-      const result: AnalysisResult = await response.json();
-      setData(result);
+      // Read the SSE stream chunk-by-chunk
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || ""; // Keep the incomplete chunk in the buffer
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const dataStr = line.replace("data: ", "");
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (parsed.type === "log") {
+                setLiveLogs((prev) => [...prev, parsed.message]);
+              } else if (parsed.type === "complete") {
+                setData(parsed.data);
+                setIsAnalyzing(false);
+              } else if (parsed.type === "error") {
+                setErrorMsg(parsed.message);
+                setIsAnalyzing(false);
+              }
+            } catch (err) {
+              console.error("Error parsing stream data chunk", err);
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error("Connection failed:", error);
-      setErrorMsg("Error: Failed to reach the FastAPI backend on port 8001.");
-    } finally {
+      setErrorMsg("Error: Failed to reach the FastAPI backend or stream interrupted.");
       setIsAnalyzing(false);
     }
   };
@@ -167,8 +207,6 @@ export default function Home() {
       <div className="w-full max-w-6xl mb-10">
         <div className="bg-zinc-950/70 backdrop-blur-xl p-2.5 rounded-2xl border border-zinc-800 shadow-2xl">
           <form onSubmit={handleAnalyze} className="flex flex-col md:flex-row gap-3">
-            
-            {/* Target Input (Company Name or Ticker) */}
             <div className="relative flex-1">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                 <Search className="h-4 w-4 text-zinc-500" />
@@ -184,7 +222,6 @@ export default function Home() {
               />
             </div>
 
-            {/* Peer Input (Company Name or Ticker, or Auto-discover) */}
             <div className="relative flex-1">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                 <Sparkles className="h-4 w-4 text-zinc-500" />
@@ -225,8 +262,44 @@ export default function Home() {
         )}
       </div>
 
+      {/* LIVE AGENT TERMINAL (Shows while analyzing) */}
+      {isAnalyzing && !data && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-6xl glass-panel p-6 rounded-2xl border border-zinc-800/80 shadow-2xl flex flex-col h-96 font-mono text-sm overflow-hidden"
+        >
+          <div className="flex items-center gap-2 mb-4 border-b border-zinc-800/80 pb-3 text-zinc-500">
+            <Terminal className="w-4 h-4 text-red-500" />
+            <span className="uppercase tracking-widest text-xs">LangGraph Autonomous Execution</span>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto space-y-3 pb-4 pr-2 custom-scrollbar">
+            {liveLogs.map((log, i) => (
+              <motion.div 
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                key={i} 
+                className={`text-zinc-300 ${log.includes('[Error]') || log.includes('failed') ? 'text-red-400' : ''} ${log.includes('[Success]') ? 'text-emerald-400' : ''}`}
+              >
+                <span className="text-zinc-600 mr-3 hidden md:inline-block">[{new Date().toLocaleTimeString()}]</span>
+                {log}
+              </motion.div>
+            ))}
+            
+            {/* Blinking cursor / loading indicator */}
+            <div className="flex items-center gap-3 text-zinc-500 mt-4">
+              <Loader2 className="w-4 h-4 animate-spin text-red-500" />
+              <span className="animate-pulse">Awaiting next node execution...</span>
+            </div>
+            
+            <div ref={terminalEndRef} />
+          </div>
+        </motion.div>
+      )}
+
       {/* Main Analysis Display - Bento Grid */}
-      {data ? (
+      {data && !isAnalyzing && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -367,7 +440,7 @@ export default function Home() {
             </div>
           )}
         </motion.div>
-      ) : null}
+      )}
     </main>
   );
 }
