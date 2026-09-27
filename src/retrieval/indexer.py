@@ -1,7 +1,10 @@
+import argparse
+import gc
 import json
 import logging
-import gc
 from pathlib import Path
+from typing import List
+
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
@@ -13,34 +16,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vector_indexer")
 
-def build_index():
-    # Adjust this to match where your JSON files are saved (e.g., data/processed or data/json_chunks)
-    json_dir = Path("data/processed") 
+def build_index(ticker: str = None):
+    processed_dir = Path("data/processed")
     chroma_dir = Path("data/chroma")
     
-    if not json_dir.exists():
-        logger.error(f"No processed data found in {json_dir}.")
+    if not processed_dir.exists():
+        logger.error(f"No processed directory found at {processed_dir}.")
         return
 
-    json_files = list(json_dir.glob("*.json"))
-    logger.info(f"Found {len(json_files)} JSON files. Preparing documents...")
+    # Check dedicated subfolder first; fall back to filename matching for legacy data
+    if ticker:
+        ticker_upper = ticker.strip().upper()
+        ticker_subfolder = processed_dir / ticker_upper
+        if ticker_subfolder.exists():
+            json_files = list(ticker_subfolder.glob("*.json"))
+            logger.info("Reading %d JSON files from dedicated folder: %s", len(json_files), ticker_subfolder)
+        else:
+            json_files = list(processed_dir.glob(f"*{ticker_upper}*.json"))
+            logger.info("Reading %d legacy flat JSON files matching ticker '%s'", len(json_files), ticker_upper)
+    else:
+        json_files = list(processed_dir.rglob("*.json"))
+        logger.info("Full mode: Found %d total JSON files across all folders.", len(json_files))
 
-    if len(json_files) == 0:
-        logger.warning("No files to index.")
+    if not json_files:
+        logger.warning("No JSON files found to index.")
         return
 
-    # Initialize Embeddings
     logger.info("Initializing FastEmbed Embeddings (BAAI/bge-small-en-v1.5)...")
     embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
     
-    # Initialize ChromaDB connection
     vectorstore = Chroma(
         embedding_function=embeddings, 
         persist_directory=str(chroma_dir),
-        collection_metadata={"hnsw:sync_threshold": 10} # Forces HNSW segment to flush to disk safely!
+        collection_metadata={"hnsw:sync_threshold": 10}
     )
     
-    # BATCHING LOGIC: Process 25 files at a time to prevent SIGTERM: 15 (Out of Memory)
     BATCH_SIZE = 25
     total_batches = (len(json_files) + BATCH_SIZE - 1) // BATCH_SIZE
     
@@ -68,14 +78,15 @@ def build_index():
         current_batch = (i // BATCH_SIZE) + 1
         logger.info(f"Embedding batch {current_batch} of {total_batches} ({len(documents)} documents)...")
         
-        # Add to database
         vectorstore.add_documents(documents)
-        
-        # Force Python to release the RAM used by this batch
         del documents
         gc.collect()
 
     logger.info(f"Success! ChromaDB saved to disk at: {chroma_dir}")
 
 if __name__ == "__main__":
-    build_index()
+    parser = argparse.ArgumentParser(description="Index SEC filing JSONs into ChromaDB.")
+    parser.add_argument("--ticker", type=str, default=None, help="Specific ticker to index.")
+    args = parser.parse_args()
+
+    build_index(ticker=args.ticker)
