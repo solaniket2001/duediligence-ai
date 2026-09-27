@@ -2,7 +2,6 @@ import io
 import json
 import logging
 import re
-from html import escape as html_escape
 from pathlib import Path
 
 import pandas as pd
@@ -38,7 +37,7 @@ def clean_sec_table(df: pd.DataFrame) -> str:
                 
             val = str(row.iloc[j]).strip()
             
-            # 2. Symbol merging (Merge stray $ or % with the next/previous number)
+            # 2. Symbol merging (Merge stray $ or % with the adjacent number)
             if val == "$" and j + 1 < len(row):
                 next_val = str(row.iloc[j+1]).strip()
                 cleaned_row.append(f"${next_val}")
@@ -60,7 +59,6 @@ def clean_sec_table(df: pd.DataFrame) -> str:
             if not col: 
                 continue
                 
-            # Treat "100" and "100.0" as the same value to eliminate phantom floats
             compare_val = col.replace(".0", "").replace("$", "")
             
             if compare_val not in seen:
@@ -71,38 +69,17 @@ def clean_sec_table(df: pd.DataFrame) -> str:
             
     return "\n".join(final_rows)
 
-    # 3. Deduplicate headers (e.g., removing repeated "2025" or "Change")
-    final_rows = []
-    for i, row in enumerate(cleaned_rows):
-        if i == 0:  # Header row deduplication
-            seen = set()
-            deduped_header = []
-            for col in row:
-                if col and col not in seen:
-                    deduped_header.append(col)
-                    seen.add(col)
-            final_rows.append(" | ".join(deduped_header))
-        else:
-            # Filter out empty strings from data rows to match header alignment
-            data_row = [col for col in row if col]
-            final_rows.append(" | ".join(data_row))
-            
-    return "\n".join(final_rows)
-
 
 def _get_preceding_context(element) -> str:
     """Finds the nearest preceding text (like a heading) to provide context for a table."""
     try:
-        # Find preceding paragraphs or headings
         preceding = element.xpath("./preceding::*[local-name()='p' or local-name()='div' or local-name()='span' or starts-with(local-name(), 'h')][normalize-space(text())!='']")
         context_parts = []
-        # Look backwards through the last 5 elements
         for p in reversed(preceding[-5:]):
             text = re.sub(r"\s+", " ", " ".join(p.itertext())).strip()
-            # Only keep substantial text fragments, not page numbers
             if text and len(text) > 8 and not text.isdigit():
                 context_parts.append(text)
-                if len(context_parts) == 2:  # Grab up to 2 preceding context strings
+                if len(context_parts) == 2:
                     break
         
         if context_parts:
@@ -192,7 +169,7 @@ def _filing_metadata(filepath: Path) -> tuple[str, str, str]:
     else:
         year = "UNKNOWN"
 
-    return ticker, filing_type, year
+    return ticker.upper(), filing_type, year
 
 
 def _write_payload(output_dir: Path, payload: dict) -> None:
@@ -210,7 +187,11 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path) -> None:
         raise FileNotFoundError(f"SEC filing was not found: {filepath}")
 
     ticker, filing_type, year = _filing_metadata(filepath)
-    logger.info("Processing SEC submission: %s", filepath)
+    
+    # Dedicated directory per ticker (e.g., data/processed/AAPL)
+    ticker_dir = output_dir / ticker
+    ticker_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Processing SEC submission: %s (saving to %s)", filepath, ticker_dir)
 
     content = filepath.read_text(encoding="utf-8", errors="replace")
     document_content = _extract_10k_document(content)
@@ -232,7 +213,6 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path) -> None:
                     if len(cleaned.splitlines()) >= 3:
                         table_count += 1
                         
-                        # Combine context with table content
                         final_content = f"CONTEXT: {context_header}\n\nTABLE:\n{cleaned}"
                         
                         payload = {
@@ -243,9 +223,8 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path) -> None:
                             "chunk_type": "table",
                             "content": final_content,
                         }
-                        _write_payload(output_dir, payload)
+                        _write_payload(ticker_dir, payload)
                         
-                # Crucial step: Remove the table from the HTML tree so it isn't processed twice
                 parent = table.getparent()
                 if parent is not None:
                     parent.remove(table)
@@ -253,17 +232,16 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path) -> None:
         except (ValueError, TypeError):
             continue
 
-    # 2. Extract Narrative Text (Risk Factors, MD&A, Business)
+    # 2. Extract Narrative Text
     narrative_text = " ".join(root.itertext())
     narrative_text = re.sub(r"\s+", " ", narrative_text).strip()
     
-    # Split the massive text block into manageable chunks
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=250)
     chunks = text_splitter.split_text(narrative_text)
     
     text_count = 0
     for i, chunk in enumerate(chunks):
-        if len(chunk.strip()) > 50: # Skip empty chunks
+        if len(chunk.strip()) > 50:
             text_count += 1
             payload = {
                 "document_id": f"{ticker}_{filing_type}_{year}_text_{text_count}",
@@ -273,9 +251,6 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path) -> None:
                 "chunk_type": "text",
                 "content": chunk.strip(),
             }
-            _write_payload(output_dir, payload)
+            _write_payload(ticker_dir, payload)
 
-    logger.info(f"Extraction complete: saved {table_count} tables and {text_count} narrative text chunks.")
-
-if __name__ == "__main__":
-    pass
+    logger.info(f"Extraction complete: saved {table_count} tables and {text_count} narrative text chunks into {ticker_dir}.")
