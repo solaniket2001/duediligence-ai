@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import asyncio
+from queue import Empty, Queue
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
 
@@ -60,7 +61,7 @@ async def health_check():
 @app.post("/api/analyze")
 async def run_analysis(payload: AnalysisRequest, db: AsyncSession = Depends(get_db)):
     
-    async def event_generator():
+    async def analysis_generator():
         try:
             graph_input = normalize_graph_input(payload.dict())
             
@@ -69,19 +70,53 @@ async def run_analysis(payload: AnalysisRequest, db: AsyncSession = Depends(get_
             
             final_state = None
             
-            # 2. Stream LangGraph node updates dynamically as they finish
-            async for output in app_graph.astream(graph_input, stream_mode="updates"):
-                for node_name, node_state in output.items():
-                    # If the node yielded a live_log, stream it immediately to the UI
+            # The graph contains synchronous retrieval and model calls. Run it in
+            # a worker thread so those calls cannot block FastAPI's event loop.
+            updates: Queue = Queue()
+
+            async def consume_graph():
+                try:
+                    async for output in app_graph.astream(graph_input, stream_mode="updates"):
+                        updates.put(("update", output))
+                    updates.put(("complete", None))
+                except Exception as exc:
+                    updates.put(("error", exc))
+
+            def run_graph():
+                asyncio.run(consume_graph())
+
+            graph_task = asyncio.create_task(asyncio.to_thread(run_graph))
+            keep_alive_at = asyncio.get_running_loop().time() + 10
+
+            # 2. Stream LangGraph node updates dynamically as they finish.
+            while True:
+                try:
+                    update_type, update = updates.get_nowait()
+                except Empty:
+                    now = asyncio.get_running_loop().time()
+                    if now >= keep_alive_at:
+                        yield ": keep-alive\n\n"
+                        keep_alive_at = now + 10
+                    await asyncio.sleep(0.1)
+                    continue
+
+                keep_alive_at = asyncio.get_running_loop().time() + 10
+                if update_type == "complete":
+                    break
+                if update_type == "error":
+                    raise update
+
+                for node_name, node_state in update.items():
                     if isinstance(node_state, dict) and "live_log" in node_state:
                         msg = node_state["live_log"]
                         yield f"data: {json.dumps({'type': 'log', 'message': msg})}\n\n"
-                    
-                    # Update our running state
+
                     if final_state is None:
                         final_state = {}
                     final_state.update(node_state)
-                
+
+            await graph_task
+
             # 3. Extract final values
             target_ticker = final_state.get("ticker", payload.ticker)
             company_name = final_state.get("company_name", payload.company_name)
@@ -127,5 +162,36 @@ async def run_analysis(payload: AnalysisRequest, db: AsyncSession = Depends(get_
             # If the system crashes (like the memory error), send it directly to the UI!
             yield f"data: {json.dumps({'type': 'error', 'message': f'System Error: {str(e)}'})}\n\n"
 
-    # Wrap the generator in a StreamingResponse with the SSE MIME type
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    async def event_generator():
+        chunks = asyncio.Queue()
+
+        async def pump_analysis():
+            async for chunk in analysis_generator():
+                await chunks.put(chunk)
+            await chunks.put(None)
+
+        analysis_task = asyncio.create_task(pump_analysis())
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(chunks.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+
+                if chunk is None:
+                    break
+                yield chunk
+        finally:
+            if not analysis_task.done():
+                analysis_task.cancel()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

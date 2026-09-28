@@ -10,3 +10,5 @@ venv/
 .git/
 .gitignore
 .env
+web/node_modules/
+web/.next/

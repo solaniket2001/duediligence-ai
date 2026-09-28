@@ -22,7 +22,7 @@ services:
     container_name: argus-chroma
     restart: always
     ports:
-      - "8000:8000"
+      - "8000:8000"  # Moved Chroma back to 8000
     volumes:
       - ./data/chroma:/data
     environment:
@@ -42,6 +42,7 @@ services:
     environment:
       - CHROMA_SERVER_HOST=localhost
       - CHROMA_SERVER_HTTP_PORT=8000
+      - DATABASE_URL=postgresql+asyncpg://admin:secret@localhost:5432/argus
     volumes:
       - ./data:/app/data
       - ./src:/app/src
@@ -49,6 +50,26 @@ services:
       postgres:
         condition: service_healthy
     command: ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8001"]
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: argus-web
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - API_INTERNAL_URL=http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api
+    command: ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]
 
 volumes:
   postgres_data:

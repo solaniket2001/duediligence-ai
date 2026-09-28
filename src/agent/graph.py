@@ -74,8 +74,15 @@ def fetch_context_chunks(query: str, ticker: str, top_k: int = 5) -> List[str]:
     return chunks
 
 def get_llm() -> ChatGoogleGenerativeAI:
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=api_key, max_output_tokens=4096)
+    api_key = os.getenv("GEMINI_API_KEY")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    return ChatGoogleGenerativeAI(
+        model=model,
+        google_api_key=api_key,
+        max_output_tokens=4096,
+        # Retrying quota errors multiplies usage and delays the SSE error.
+        max_retries=1,
+    )
 
 def extract_text_from_response(content: Any) -> str:
     if isinstance(content, str): return content

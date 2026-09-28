@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -18,14 +18,17 @@ logger = logging.getLogger("financial_agent")
 
 # Securely load environment variables
 load_dotenv()
-if not os.getenv("GROQ_API_KEY"):
-    raise ValueError("GROQ_API_KEY not found in .env file. Please add it.")
+gemini_key = os.getenv("GEMINI_API_KEY")
+if not gemini_key:
+    raise ValueError("GEMINI_API_KEY not found in .env file. Please add it.")
+
+# LangChain defaults to looking for GOOGLE_API_KEY, so we map it here automatically
+os.environ["GOOGLE_API_KEY"] = gemini_key
 
 def run_financial_analysis(query: str, year: str = "2025"):
     """Orchestrates the RAG pipeline: Retrieval + LLM Generation"""
     
     # STAGE 1: RETRIEVAL (Phase 2)
-    
     db_dir = Path("data/chroma")
     retriever = SECRetriever(db_dir)
     
@@ -46,18 +49,15 @@ def run_financial_analysis(query: str, year: str = "2025"):
     context = "\n\n".join([doc['text'] for doc in retrieved_docs])
     
     # STAGE 2: GENERATION (Phase 3)
+    logger.info("Initializing Google Gemini Engine...")
     
-    logger.info("Initializing Groq AI Engine (Llama-3-70B)...")
-    
-    # Temperature 0.0 forces strict, factual analysis without hallucination
-    
-    llm = ChatGroq(
-        model="openai/gpt-oss-120b",
+    # Initialize the 3.1 model with max_retries for native 503/429 handling
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-3.1-flash-lite",
         temperature=0.0, 
-        max_tokens=1024
+        max_output_tokens=1024,
+        max_retries=1
     )
-    
-    # Create the strict System Prompt
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
@@ -69,9 +69,13 @@ def run_financial_analysis(query: str, year: str = "2025"):
         ("human", "{query}")
     ])
     
-    # Build the LangChain Pipeline (LCEL)
+    # Build the LangChain Pipeline (LCEL) with jittered exponential backoff
+    llm_with_retry = llm.with_retry(
+        stop_after_attempt=1,
+        wait_exponential_jitter=True
+    )
     
-    chain = prompt | llm | StrOutputParser()
+    chain = prompt | llm_with_retry | StrOutputParser()
     
     logger.info("Generating financial analysis...")
     response = chain.invoke({"context": context, "query": query})

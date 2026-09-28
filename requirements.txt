@@ -2,7 +2,8 @@ fastapi>=0.115.0
 uvicorn>=0.24.0
 pydantic>=2.7.0
 python-dotenv>=1.0.1
-sqlalchemy>=2.0.0
+sqlalchemy[asyncio]>=2.0.0
+greenlet>=3.0.0
 psycopg2-binary
 asyncpg
 sec-edgar-downloader>=5.1.0

@@ -59,9 +59,11 @@ class SECRetriever:
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.llm = (
             ChatGoogleGenerativeAI(
-                model="gemini-3.5-flash-lite",
+                model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
                 google_api_key=api_key,
                 max_output_tokens=300,
+                # Do not amplify quota/rate-limit responses during retrieval.
+                max_retries=1,
             )
             if api_key
             else None
