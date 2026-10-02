@@ -8,6 +8,7 @@ from typing import List
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
+from src.retrieval.chroma_lock import chroma_lock
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -45,42 +46,43 @@ def build_index(ticker: str = None):
     logger.info("Initializing FastEmbed Embeddings (BAAI/bge-small-en-v1.5)...")
     embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
     
-    vectorstore = Chroma(
-        embedding_function=embeddings, 
-        persist_directory=str(chroma_dir),
-        collection_metadata={"hnsw:sync_threshold": 10}
-    )
-    
-    BATCH_SIZE = 25
-    total_batches = (len(json_files) + BATCH_SIZE - 1) // BATCH_SIZE
-    
-    for i in range(0, len(json_files), BATCH_SIZE):
-        batch_files = json_files[i:i+BATCH_SIZE]
-        documents = []
-        
-        for file_path in batch_files:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    doc = Document(
-                        page_content=data['content'],
-                        metadata={
-                            "document_id": data.get('document_id', ''),
-                            "ticker": data.get('ticker', ''),
-                            "year": str(data.get('year', '')),
-                            "chunk_type": data.get('chunk_type', '')
-                        }
-                    )
-                    documents.append(doc)
-            except Exception as e:
-                logger.error(f"Failed to read {file_path.name}: {e}")
-                
-        current_batch = (i // BATCH_SIZE) + 1
-        logger.info(f"Embedding batch {current_batch} of {total_batches} ({len(documents)} documents)...")
-        
-        vectorstore.add_documents(documents)
-        del documents
-        gc.collect()
+    with chroma_lock(chroma_dir):
+        vectorstore = Chroma(
+            embedding_function=embeddings,
+            persist_directory=str(chroma_dir),
+            collection_metadata={"hnsw:sync_threshold": 10}
+        )
+
+        BATCH_SIZE = 25
+        total_batches = (len(json_files) + BATCH_SIZE - 1) // BATCH_SIZE
+
+        for i in range(0, len(json_files), BATCH_SIZE):
+            batch_files = json_files[i:i+BATCH_SIZE]
+            documents = []
+
+            for file_path in batch_files:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        doc = Document(
+                            page_content=data['content'],
+                            metadata={
+                                "document_id": data.get('document_id', ''),
+                                "ticker": data.get('ticker', ''),
+                                "year": str(data.get('year', '')),
+                                "chunk_type": data.get('chunk_type', '')
+                            }
+                        )
+                        documents.append(doc)
+                except Exception as e:
+                    logger.error(f"Failed to read {file_path.name}: {e}")
+
+            current_batch = (i // BATCH_SIZE) + 1
+            logger.info(f"Embedding batch {current_batch} of {total_batches} ({len(documents)} documents)...")
+
+            vectorstore.add_documents(documents)
+            del documents
+            gc.collect()
 
     logger.info(f"Success! ChromaDB saved to disk at: {chroma_dir}")
 

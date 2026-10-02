@@ -14,6 +14,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from flashrank import Ranker, RerankRequest
+from src.retrieval.chroma_lock import chroma_lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +28,7 @@ class SECRetriever:
     def __init__(self, persist_dir: Path):
         if not persist_dir.exists():
             raise FileNotFoundError(f"ChromaDB not found at {persist_dir}")
+        self.persist_dir = persist_dir
 
         # TOWER 1: DENSE VECTOR ENGINE (Semantic Meaning)
         logger.info("Initializing Dense Embeddings Engine...")
@@ -39,7 +41,8 @@ class SECRetriever:
 
         # TOWER 2: SPARSE BM25 ENGINE (Exact Keyword Matching)
         logger.info("Initializing BM25 Sparse Engine...")
-        db_data = self.vector_store.get(include=["documents", "metadatas"])
+        with chroma_lock(persist_dir):
+            db_data = self.vector_store.get(include=["documents", "metadatas"])
         self.all_documents = [
             Document(page_content=doc, metadata=meta)
             for doc, meta in zip(db_data["documents"], db_data["metadatas"])
@@ -122,16 +125,17 @@ class SECRetriever:
                 chroma_filter = metadata_filter
 
         # TOWER 1: Dense Search (Original Query)
-        dense_docs = self.vector_store.similarity_search(query, k=top_k, filter=chroma_filter)
+        with chroma_lock(self.persist_dir):
+            dense_docs = self.vector_store.similarity_search(query, k=top_k, filter=chroma_filter)
 
-        # TOWER 1b: HyDE Dense Search (Document-to-Document matching)
-        hyde_docs: List[Document] = []
-        if enable_hyde:
-            hypothetical_passage = self.generate_hypothetical_passage(query)
-            if hypothetical_passage != query:
-                hyde_docs = self.vector_store.similarity_search(
-                    hypothetical_passage, k=top_k, filter=chroma_filter
-                )
+            # TOWER 1b: HyDE Dense Search (Document-to-Document matching)
+            hyde_docs: List[Document] = []
+            if enable_hyde:
+                hypothetical_passage = self.generate_hypothetical_passage(query)
+                if hypothetical_passage != query:
+                    hyde_docs = self.vector_store.similarity_search(
+                        hypothetical_passage, k=top_k, filter=chroma_filter
+                    )
 
         # TOWER 2: Sparse Keyword Search (BM25)
         sparse_docs = self.bm25.invoke(query) if self.bm25 else []

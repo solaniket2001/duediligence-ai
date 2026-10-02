@@ -54,7 +54,7 @@ def main():
     # 3. Vector Indexing into ChromaDB (Run as a module with -m)
     print(f"\n--- [3/3] Indexing into ChromaDB ---")
     subprocess.run(
-        [sys.executable, "-m", "src.retrieval.indexer"],
+        [sys.executable, "-m", "src.retrieval.indexer", "--ticker", ticker],
         env=env,
         check=True,
     )

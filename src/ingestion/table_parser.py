@@ -203,7 +203,7 @@ def extract_and_save_sec_data(filepath: Path, output_dir: Path) -> None:
     for table in root.xpath(".//*[local-name()='table']"):
         try:
             table_html = html.tostring(table, encoding="unicode")
-            dfs = pd.read_html(io.StringIO(table_html))
+            dfs = pd.read_html(io.StringIO(table_html), flavor="lxml")
             
             if dfs:
                 context_header = _get_preceding_context(table)

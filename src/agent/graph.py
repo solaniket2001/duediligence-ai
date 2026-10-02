@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 import difflib
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
@@ -16,6 +17,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 
 from src.retrieval.retriever import SECRetriever
+from src.retrieval.chroma_lock import chroma_lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +51,19 @@ class DueDiligenceState(TypedDict, total=False):
 
 def get_retriever() -> SECRetriever:
     return SECRetriever(Path("data/chroma"))
+
+def ticker_is_indexed(ticker: str) -> bool:
+    """Return whether the local vector index contains at least one document."""
+    try:
+        retriever = get_retriever()
+        with chroma_lock(Path("data/chroma")):
+            return any(
+                (metadata or {}).get("ticker") == ticker.upper()
+                for metadata in retriever.vector_store.get(include=["metadatas"]).get("metadatas", [])
+            )
+    except Exception as exc:
+        logger.warning("Unable to verify vector index for %s: %s", ticker, exc)
+        return False
 
 def fetch_context_chunks_with_score(query: str, ticker: str, top_k: int = 5) -> Tuple[List[str], float]:
     retriever = get_retriever()
@@ -140,20 +155,25 @@ async def async_ensure_ticker_ingested(ticker: str):
         
     ticker = ticker.upper()
     ticker_dir = Path(f"data/raw/sec-edgar-filings/{ticker}")
+    processed_dir = Path(f"data/processed/{ticker}")
     
-    if ticker_dir.exists():
+    if ticker_dir.exists() and list(processed_dir.glob("*.json")) and ticker_is_indexed(ticker):
         yield f"[System] {ticker} verified in local database."
         return
 
     yield f"[JIT Trigger] {ticker} missing. Booting autonomous ingestion pipeline..."
     
     env = os.environ.copy()
-    env["PYTHONPATH"] = "/app"
+    project_root = Path(__file__).resolve().parents[2]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(project_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     
     process = await asyncio.create_subprocess_exec(
-        "python", "src/retrieval/ingest.py", "--ticker", ticker,
+        sys.executable, "-m", "src.retrieval.ingest", "--ticker", ticker,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        cwd=str(project_root),
         env=env
     )
 
@@ -168,9 +188,14 @@ async def async_ensure_ticker_ingested(ticker: str):
 
     await process.wait()
     if process.returncode != 0:
-        yield f"[Error] JIT Ingestion failed with code {process.returncode}"
-    else:
-        yield f"[Success] {ticker} is now fully ingested and ready."
+        raise RuntimeError(
+            f"Automatic SEC ingestion failed for {ticker} with code {process.returncode}."
+        )
+
+    if not list(processed_dir.glob("*.json")):
+        raise RuntimeError(f"Automatic SEC ingestion produced no data for {ticker}.")
+
+    yield f"[Success] {ticker} is now fully ingested and ready."
 
 # --- Graph Nodes ---
 

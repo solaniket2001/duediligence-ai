@@ -9,6 +9,7 @@ asyncpg
 sec-edgar-downloader>=5.1.0
 pandas>=2.2.0
 beautifulsoup4>=4.12.0
+html5lib>=1.1
 lxml>=4.9.0
 lxml-html-clean>=0.1.0
 chromadb>=0.4.24
