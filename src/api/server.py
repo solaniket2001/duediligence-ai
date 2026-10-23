@@ -2,49 +2,55 @@ import os
 import sys
 import json
 import asyncio
-from queue import Empty, Queue
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from dotenv import load_dotenv
 
 load_dotenv()
 
 sys.path.append(os.getcwd())
-from src.agent.graph import build_due_diligence_graph, normalize_graph_input
+from src.agent.graph import (
+    set_live_log_queue,
+    build_due_diligence_graph,
+    normalize_graph_input,
+    fetch_context_chunks,
+    get_llm,
+    extract_text_from_response,
+)
 from src.db.database import engine, Base, get_db
 from src.db.models import DueDiligenceReport
 
-try:
-    from src.utils.ticker_resolver import resolve_ticker
-except ImportError:
-    pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield 
+    yield
     await engine.dispose()
+
 
 app = FastAPI(
     title="Due Diligence AI Engine",
-    description="Autonomous multi-agent SEC financial analysis",
-    version="1.0.0",
-    lifespan=lifespan
+    description="Autonomous multi-agent SEC financial analysis & Live Interrogation API",
+    version="1.1.0",
+    lifespan=lifespan,
 )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allows seamless connection through Codespace port forwarding
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 class AnalysisRequest(BaseModel):
     ticker: str
@@ -52,96 +58,91 @@ class AnalysisRequest(BaseModel):
     peer_ticker: Optional[str] = None
     peer_name: Optional[str] = None
 
+
+class ChatMessageItem(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    question: str
+    ticker: str
+    company_name: Optional[str] = None
+    peer_ticker: Optional[str] = None
+    memo: str = ""
+    quantitative_analysis: str = ""
+    news_context: str = ""
+    chat_history: List[ChatMessageItem] = []
+
+
 app_graph = build_due_diligence_graph()
+
 
 @app.get("/")
 async def health_check():
     return {"status": "online", "engine": "Due Diligence API"}
 
+
 @app.post("/api/analyze")
 async def run_analysis(payload: AnalysisRequest, db: AsyncSession = Depends(get_db)):
-    
     async def analysis_generator():
         try:
-            graph_input = normalize_graph_input(payload.dict())
-            
-            # 1. Notify frontend that process has started
-            yield f"data: {json.dumps({'type': 'log', 'message': f'System Boot: Initializing Due Diligence Engine for {payload.ticker}...'})}\n\n"
-            
-            final_state = None
-            
-            # The graph contains synchronous retrieval and model calls. Run it in
-            # a worker thread so those calls cannot block FastAPI's event loop.
-            updates: Queue = Queue()
+            payload_dict = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+            graph_input = normalize_graph_input(payload_dict)
 
-            async def consume_graph():
+            yield f"data: {json.dumps({'type': 'log', 'message': f'System Boot: Initializing Due Diligence Engine for {payload.ticker}...'})}\n\n"
+
+            final_state = dict(graph_input)
+
+            log_queue: asyncio.Queue = asyncio.Queue()
+            set_live_log_queue(log_queue)
+            emitted_logs = set()
+
+            async def run_graph_stream():
                 try:
                     async for output in app_graph.astream(graph_input, stream_mode="updates"):
-                        updates.put(("update", output))
-                    updates.put(("complete", None))
-                except Exception as exc:
-                    updates.put(("error", exc))
+                        for _, node_state in output.items():
+                            if isinstance(node_state, dict):
+                                final_state.update(node_state)
+                finally:
+                    await log_queue.put(None)
 
-            def run_graph():
-                asyncio.run(consume_graph())
-
-            graph_task = asyncio.create_task(asyncio.to_thread(run_graph))
-            keep_alive_at = asyncio.get_running_loop().time() + 10
-
-            # 2. Stream LangGraph node updates dynamically as they finish.
+            graph_task = asyncio.create_task(run_graph_stream())
             while True:
-                try:
-                    update_type, update = updates.get_nowait()
-                except Empty:
-                    now = asyncio.get_running_loop().time()
-                    if now >= keep_alive_at:
-                        yield ": keep-alive\n\n"
-                        keep_alive_at = now + 10
-                    await asyncio.sleep(0.1)
-                    continue
-
-                keep_alive_at = asyncio.get_running_loop().time() + 10
-                if update_type == "complete":
+                msg = await log_queue.get()
+                if msg is None:
                     break
-                if update_type == "error":
-                    raise update
-
-                for node_name, node_state in update.items():
-                    if isinstance(node_state, dict) and "live_log" in node_state:
-                        msg = node_state["live_log"]
-                        yield f"data: {json.dumps({'type': 'log', 'message': msg})}\n\n"
-
-                    if final_state is None:
-                        final_state = {}
-                    final_state.update(node_state)
-
+                if msg not in emitted_logs:
+                    emitted_logs.add(msg)
+                    yield f"data: {json.dumps({'type': 'log', 'message': msg})}\n\n"
             await graph_task
+            set_live_log_queue(None)
 
-            # 3. Extract final values
             target_ticker = final_state.get("ticker", payload.ticker)
             company_name = final_state.get("company_name", payload.company_name)
             peer_ticker = final_state.get("peer_ticker")
             risk_score = final_state.get("risk_score", 50)
             final_memo = final_state.get("final_memo", "")
-            
-            # 4. Save to Database
+
             yield f"data: {json.dumps({'type': 'log', 'message': 'Saving final report to PostgreSQL...'})}\n\n"
-            
-            new_report = DueDiligenceReport(
-                target_ticker=target_ticker,
-                target_name=company_name,
-                peer_ticker=peer_ticker,
-                financial_score=final_state.get("financial_score", 0.0),
-                risk_score=risk_score,
-                quantitative_analysis=final_state.get("quantitative_analysis", ""),
-                news_context=final_state.get("news_context", ""),
-                final_memo=final_memo,
-                market_data=final_state.get("market_data", {})
-            )
-            db.add(new_report)
-            await db.commit()
-            
-            # 5. Send the final compiled payload to trigger the UI render
+
+            try:
+                new_report = DueDiligenceReport(
+                    target_ticker=target_ticker,
+                    target_name=company_name,
+                    peer_ticker=peer_ticker,
+                    financial_score=final_state.get("financial_score", 0.0),
+                    risk_score=risk_score,
+                    quantitative_analysis=final_state.get("quantitative_analysis", ""),
+                    news_context=final_state.get("news_context", ""),
+                    final_memo=final_memo,
+                    market_data=final_state.get("market_data", {}),
+                )
+                db.add(new_report)
+                await db.commit()
+            except Exception as db_err:
+                yield f"data: {json.dumps({'type': 'log', 'message': f'[Warning] DB save skipped: {str(db_err)}'})}\n\n"
+
             final_payload = {
                 "ticker": target_ticker,
                 "company_name": company_name,
@@ -153,41 +154,16 @@ async def run_analysis(payload: AnalysisRequest, db: AsyncSession = Depends(get_
                 "news_context": final_state.get("news_context", ""),
                 "final_memo": final_memo,
                 "risk_score": risk_score,
-                "market_data": final_state.get("market_data", {})
+                "market_data": final_state.get("market_data", {}),
             }
-            
+
             yield f"data: {json.dumps({'type': 'complete', 'data': final_payload})}\n\n"
-            
+
         except Exception as e:
-            # If the system crashes (like the memory error), send it directly to the UI!
             yield f"data: {json.dumps({'type': 'error', 'message': f'System Error: {str(e)}'})}\n\n"
 
-    async def event_generator():
-        chunks = asyncio.Queue()
-
-        async def pump_analysis():
-            async for chunk in analysis_generator():
-                await chunks.put(chunk)
-            await chunks.put(None)
-
-        analysis_task = asyncio.create_task(pump_analysis())
-        try:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(chunks.get(), timeout=10)
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-
-                if chunk is None:
-                    break
-                yield chunk
-        finally:
-            if not analysis_task.done():
-                analysis_task.cancel()
-
     return StreamingResponse(
-        event_generator(),
+        analysis_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -195,3 +171,57 @@ async def run_analysis(payload: AnalysisRequest, db: AsyncSession = Depends(get_
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/api/chat")
+async def interrogate_memo(payload: ChatRequest):
+    """Live Chat Analysis / Interrogation Mode backed by Memo + live SEC ChromaDB RAG."""
+    try:
+        # Retrieve additional raw SEC 10-K chunks for the specific question
+        sec_chunks = await asyncio.to_thread(
+            fetch_context_chunks, payload.question, payload.ticker, 4
+        )
+        peer_chunks: List[str] = []
+        if payload.peer_ticker and payload.peer_ticker not in {"NONE", "N/A"}:
+            peer_chunks = await asyncio.to_thread(
+                fetch_context_chunks, payload.question, payload.peer_ticker, 2
+            )
+
+        rag_block = "\n\n".join(sec_chunks + peer_chunks)
+
+        system_instruction = (
+            f"You are Argus (KORE Engine), an elite institutional financial analyst AI. "
+            f"You are in Live Interrogation Mode for {payload.company_name or payload.ticker} ({payload.ticker})"
+            f"{f' benchmarked against {payload.peer_ticker}' if payload.peer_ticker else ''}.\n\n"
+            "Answer the user's question with institutional rigor using the Investment Memo, Quantitative Analysis, "
+            "and freshly retrieved SEC 10-K filing chunks below. Cite specific document IDs (e.g., [DOC_ID]) when referencing SEC filing data. "
+            "Do not use LaTeX math syntax; write formulas and numbers in clean plain text or Markdown tables. "
+            "If the information is genuinely absent from both the memo and SEC filings, state that clearly.\n\n"
+            f"=== INVESTMENT MEMORANDUM ===\n{payload.memo}\n\n"
+            f"=== QUANTITATIVE ANALYSIS ===\n{payload.quantitative_analysis}\n\n"
+            f"=== LIVE NEWS CONTEXT ===\n{payload.news_context}\n\n"
+            f"=== DIRECT SEC 10-K RETRIEVAL CHUNKS ===\n{rag_block or 'No additional SEC chunks retrieved.'}"
+        )
+
+        messages = [SystemMessage(content=system_instruction)]
+        for msg in payload.chat_history[-10:]:
+            if msg.role == "user":
+                messages.append(HumanMessage(content=msg.content))
+            else:
+                messages.append(AIMessage(content=msg.content))
+
+        messages.append(HumanMessage(content=payload.question))
+
+        llm = get_llm()
+        response = await llm.ainvoke(messages)
+        answer = extract_text_from_response(response.content).strip()
+
+        return {
+            "answer": answer,
+            "sources_count": len(sec_chunks) + len(peer_chunks),
+        }
+    except Exception as exc:
+        return {
+            "answer": f"Interrogation Error: {str(exc)}",
+            "sources_count": 0,
+        }
