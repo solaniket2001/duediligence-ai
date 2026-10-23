@@ -23,57 +23,82 @@ logging.basicConfig(
 )
 logger = logging.getLogger("enterprise_retriever")
 
+_SHARED_EMBEDDINGS: Optional[FastEmbedEmbeddings] = None
+_SHARED_RANKER: Optional[Ranker] = None
+
+
+def get_shared_embeddings() -> FastEmbedEmbeddings:
+    global _SHARED_EMBEDDINGS
+    if _SHARED_EMBEDDINGS is None:
+        logger.info("Initializing Dense Embeddings Engine (Singleton)...")
+        _SHARED_EMBEDDINGS = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    return _SHARED_EMBEDDINGS
+
+
+def get_shared_ranker() -> Ranker:
+    global _SHARED_RANKER
+    if _SHARED_RANKER is None:
+        logger.info("Initializing FlashRank Cross-Encoder (Singleton)...")
+        _SHARED_RANKER = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir="/tmp")
+    return _SHARED_RANKER
+
 
 class SECRetriever:
     def __init__(self, persist_dir: Path):
-        if not persist_dir.exists():
-            raise FileNotFoundError(f"ChromaDB not found at {persist_dir}")
+        persist_dir.mkdir(parents=True, exist_ok=True)
         self.persist_dir = persist_dir
 
-        # TOWER 1: DENSE VECTOR ENGINE (Semantic Meaning)
-        logger.info("Initializing Dense Embeddings Engine...")
-        self.embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        self.embeddings = get_shared_embeddings()
+        self.ranker = get_shared_ranker()
 
         self.vector_store = Chroma(
             persist_directory=str(persist_dir),
             embedding_function=self.embeddings,
         )
 
-        # TOWER 2: SPARSE BM25 ENGINE (Exact Keyword Matching)
-        logger.info("Initializing BM25 Sparse Engine...")
-        with chroma_lock(persist_dir):
-            db_data = self.vector_store.get(include=["documents", "metadatas"])
-        self.all_documents = [
-            Document(page_content=doc, metadata=meta)
-            for doc, meta in zip(db_data["documents"], db_data["metadatas"])
-        ]
+        self.all_documents: List[Document] = []
+        self.bm25: Optional[BM25Retriever] = None
+        self.refresh_sparse_index()
 
-        if self.all_documents:
-            self.bm25 = BM25Retriever.from_documents(self.all_documents)
-            self.bm25.k = 5
-        else:
-            self.bm25 = None
-
-        # THE JUDGE: CROSS-ENCODER RERANKER
-        logger.info("Initializing FlashRank Cross-Encoder...")
-        self.ranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir="/tmp")
-
-        # HYDE GENERATOR: Fast LLM handle
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.llm = (
             ChatGoogleGenerativeAI(
                 model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
                 google_api_key=api_key,
                 max_output_tokens=300,
-                # Do not amplify quota/rate-limit responses during retrieval.
                 max_retries=1,
             )
             if api_key
             else None
         )
 
+    def refresh_sparse_index(self) -> None:
+        """Reloads ChromaDB client & HNSW segments from disk after JIT subprocess writes."""
+        with chroma_lock(self.persist_dir):
+            try:
+                from chromadb.api.client import SharedSystemClient
+                SharedSystemClient.clear_system_cache()
+            except Exception:
+                pass
+            self.vector_store = Chroma(
+                persist_directory=str(self.persist_dir),
+                embedding_function=self.embeddings,
+            )
+            db_data = self.vector_store.get(include=["documents", "metadatas"])
+        docs = db_data.get("documents") or []
+        metas = db_data.get("metadatas") or []
+        self.all_documents = [
+            Document(page_content=doc, metadata=meta or {})
+            for doc, meta in zip(docs, metas)
+            if doc
+        ]
+        if self.all_documents:
+            self.bm25 = BM25Retriever.from_documents(self.all_documents)
+            self.bm25.k = 5
+        else:
+            self.bm25 = None
+
     def generate_hypothetical_passage(self, query: str) -> str:
-        """HyDE: Generates a synthetic SEC filing excerpt matching GAAP/SEC taxonomy."""
         if not self.llm:
             return query
 
@@ -98,9 +123,7 @@ class SECRetriever:
             else:
                 synthetic_doc = str(raw_content)
 
-            synthetic_text = synthetic_doc.strip()
-            logger.info("HyDE generated synthetic passage: %s", synthetic_text[:120] + "...")
-            return synthetic_text
+            return synthetic_doc.strip() or query
         except Exception as e:
             logger.warning("HyDE generation failed (%s). Falling back to raw query.", e)
             return query
@@ -114,9 +137,8 @@ class SECRetriever:
         score_cliff: float = 0.15,
         enable_hyde: bool = True,
     ) -> List[Dict[str, Any]]:
-        logger.info("Retrieval Query: '%s' | HyDE: %s", query, enable_hyde)
+        logger.info("Retrieval Query: '%s' | Filter: %s | HyDE: %s", query, metadata_filter, enable_hyde)
 
-        # Format Chroma Filter
         chroma_filter = None
         if metadata_filter:
             if len(metadata_filter) > 1:
@@ -124,11 +146,22 @@ class SECRetriever:
             else:
                 chroma_filter = metadata_filter
 
-        # TOWER 1: Dense Search (Original Query)
         with chroma_lock(self.persist_dir):
-            dense_docs = self.vector_store.similarity_search(query, k=top_k, filter=chroma_filter)
+            try:
+                dense_docs = self.vector_store.similarity_search(query, k=top_k, filter=chroma_filter)
+            except Exception as chroma_exc:
+                logger.warning("Chroma HNSW cache stale (%s); reloading client from disk...", chroma_exc)
+                try:
+                    from chromadb.api.client import SharedSystemClient
+                    SharedSystemClient.clear_system_cache()
+                except Exception:
+                    pass
+                self.vector_store = Chroma(
+                    persist_directory=str(self.persist_dir),
+                    embedding_function=self.embeddings,
+                )
+                dense_docs = self.vector_store.similarity_search(query, k=top_k, filter=chroma_filter)
 
-            # TOWER 1b: HyDE Dense Search (Document-to-Document matching)
             hyde_docs: List[Document] = []
             if enable_hyde:
                 hypothetical_passage = self.generate_hypothetical_passage(query)
@@ -137,21 +170,14 @@ class SECRetriever:
                         hypothetical_passage, k=top_k, filter=chroma_filter
                     )
 
-        # TOWER 2: Sparse Keyword Search (BM25)
         sparse_docs = self.bm25.invoke(query) if self.bm25 else []
         if metadata_filter:
             filtered_sparse = []
             for doc in sparse_docs:
-                match = True
-                for k, v in metadata_filter.items():
-                    if doc.metadata.get(k) != v:
-                        match = False
-                        break
-                if match:
+                if all(doc.metadata.get(k) == v for k, v in metadata_filter.items()):
                     filtered_sparse.append(doc)
             sparse_docs = filtered_sparse
 
-        # MERGER: Deduplicate hits across Dense, HyDE, and Sparse pools
         unique_docs: Dict[str, Document] = {}
         for doc in dense_docs + hyde_docs + sparse_docs:
             doc_id = doc.metadata.get("document_id") or doc.page_content[:50]
@@ -159,19 +185,10 @@ class SECRetriever:
                 unique_docs[doc_id] = doc
 
         combined_results = list(unique_docs.values())
-        logger.info(
-            "Multi-Tower Merged %d Standard Dense + %d HyDE + %d Sparse into %d unique candidates.",
-            len(dense_docs),
-            len(hyde_docs),
-            len(sparse_docs),
-            len(combined_results),
-        )
-
         if not combined_results:
             logger.warning("No matches found across any retrieval tower.")
             return []
 
-        # THE JUDGE: Cross-Encoder Reranking
         passages = [
             {"id": str(idx), "text": doc.page_content, "meta": doc.metadata}
             for idx, doc in enumerate(combined_results)
@@ -179,14 +196,10 @@ class SECRetriever:
 
         rerank_request = RerankRequest(query=query, passages=passages)
         reranked_results = self.ranker.rerank(rerank_request)
-
         if not reranked_results:
             return []
 
         top_score = reranked_results[0]["score"]
-        logger.info("Cross-Encoder Top Score was: %.4f", top_score)
-
-        # Adaptive Score Cliffing
         final_results = [
             res
             for res in reranked_results
