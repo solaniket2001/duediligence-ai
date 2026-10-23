@@ -2,74 +2,57 @@ services:
   postgres:
     image: postgres:15
     container_name: argus-postgres
-    restart: always
+    restart: unless-stopped
+    network_mode: "host"
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: secret
-      POSTGRES_DB: argus
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-duediligence}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d argus"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-duediligence}"]
       interval: 5s
       timeout: 5s
       retries: 5
-
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: argus-chroma
-    restart: always
-    ports:
-      - "8000:8000"  # Moved Chroma back to 8000
-    volumes:
-      - ./data/chroma:/data
-    environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/data
-      - ANONYMIZED_TELEMETRY=FALSE
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: argus-api
-    restart: always
+    command: uvicorn src.api.server:app --host 0.0.0.0 --port 8001
+    restart: unless-stopped
     network_mode: "host"
     env_file:
       - .env
     environment:
-      - CHROMA_SERVER_HOST=localhost
-      - CHROMA_SERVER_HTTP_PORT=8000
-      - DATABASE_URL=postgresql+asyncpg://admin:secret@localhost:5432/argus
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@127.0.0.1:5432/${POSTGRES_DB:-duediligence}
+      PYTHONUNBUFFERED: "1"
     volumes:
       - ./data:/app/data
       - ./src:/app/src
+      - model_cache:/tmp
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8001"]
 
   web:
     build:
       context: ./web
       dockerfile: Dockerfile
     container_name: argus-web
-    restart: always
-    ports:
-      - "3000:3000"
+    restart: unless-stopped
+    network_mode: "host"
     environment:
-      - API_INTERNAL_URL=http://host.docker.internal:8001
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      API_INTERNAL_URL: http://127.0.0.1:8001
     volumes:
-      - ./web:/app
-      - /app/node_modules
-      - /app/.next
+      - ./web/src:/app/src
     depends_on:
       - api
-    command: ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]
 
 volumes:
   postgres_data:
+  model_cache:
