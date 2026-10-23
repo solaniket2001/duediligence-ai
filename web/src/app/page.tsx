@@ -5,7 +5,6 @@ import {
   Terminal,
   Loader2,
   ArrowRight,
-  TrendingUp,
   FileText,
   Scale,
   Newspaper,
@@ -14,7 +13,14 @@ import {
   Target,
   CheckCircle2,
   Search,
-  Sparkles
+  Sparkles,
+  MessageSquare,
+  Send,
+  Bot,
+  User,
+  Download,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import {
@@ -26,7 +32,7 @@ import {
   YAxis,
   Tooltip,
   CartesianGrid,
-  Legend
+  Legend,
 } from "recharts";
 import ReactMarkdown from "react-markdown";
 
@@ -44,6 +50,12 @@ interface AnalysisResult {
   market_data: Record<string, any>;
 }
 
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  sourcesCount?: number;
+}
+
 const parseQuantSections = (text: string, targetTicker: string, peerTicker?: string) => {
   if (!text) return { target: "", peer: "" };
   const peerKey = peerTicker ? `${peerTicker} Quantitative Analysis:` : "Peer Quantitative Analysis:";
@@ -54,7 +66,9 @@ const parseQuantSections = (text: string, targetTicker: string, peerTicker?: str
     const peerContent = parts[1]?.trim() || "";
     return { target: targetContent, peer: peerContent };
   }
-  const targetMatch = text.match(/(?:1\.\s*Target Company|Target Company|###.*Target)([\s\S]*?)(?=2\.\s*Peer Company|Peer Company|###.*Peer|$)/i);
+  const targetMatch = text.match(
+    /(?:1\.\s*Target Company|Target Company|###.*Target)([\s\S]*?)(?=2\.\s*Peer Company|Peer Company|###.*Peer|$)/i
+  );
   const peerMatch = text.match(/(?:2\.\s*Peer Company|Peer Company|###.*Peer)([\s\S]*?)$/i);
   return {
     target: targetMatch ? targetMatch[1].trim() : text,
@@ -65,12 +79,18 @@ const parseQuantSections = (text: string, targetTicker: string, peerTicker?: str
 const MarkdownBlock = ({ content }: { content: string }) => (
   <ReactMarkdown
     components={{
-      h1: ({ ...props }) => <h1 className="text-xl font-bold text-white mt-6 mb-3 border-b border-zinc-800 pb-2" {...props} />,
-      h2: ({ ...props }) => <h2 className="text-lg font-semibold text-white mt-5 mb-2 flex items-center gap-2" {...props} />,
+      h1: ({ ...props }) => (
+        <h1 className="text-xl font-bold text-white mt-6 mb-3 border-b border-zinc-800 pb-2" {...props} />
+      ),
+      h2: ({ ...props }) => (
+        <h2 className="text-lg font-semibold text-white mt-5 mb-2 flex items-center gap-2" {...props} />
+      ),
       h3: ({ ...props }) => <h3 className="text-md font-medium text-red-400 mt-4 mb-2" {...props} />,
       p: ({ ...props }) => <p className="mb-4 leading-relaxed text-zinc-300 last:mb-0 text-sm" {...props} />,
       strong: ({ ...props }) => <strong className="font-semibold text-white" {...props} />,
-      ul: ({ ...props }) => <ul className="list-disc pl-5 mb-4 space-y-1 marker:text-red-500 text-zinc-300 text-sm" {...props} />,
+      ul: ({ ...props }) => (
+        <ul className="list-disc pl-5 mb-4 space-y-1 marker:text-red-500 text-zinc-300 text-sm" {...props} />
+      ),
       li: ({ ...props }) => <li className="pl-1" {...props} />,
     }}
   >
@@ -85,15 +105,27 @@ export default function Home() {
   const [data, setData] = useState<AnalysisResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
-  
-  // Auto-scroll reference for the terminal
+  const [showLogsAfterComplete, setShowLogsAfterComplete] = useState(false);
+
+  // Live Chat / Interrogation Mode State
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+
   const terminalEndRef = useRef<HTMLDivElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (terminalEndRef.current) {
       terminalEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [liveLogs]);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chatHistory, isChatLoading]);
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,6 +135,8 @@ export default function Home() {
     setErrorMsg(null);
     setData(null);
     setLiveLogs([]);
+    setChatHistory([]);
+    setShowLogsAfterComplete(false);
 
     try {
       const payload: Record<string, any> = {
@@ -114,12 +148,11 @@ export default function Home() {
         payload.peer_name = peerInput.trim();
       }
 
-
       const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: { 
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream"
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
         },
         body: JSON.stringify(payload),
       });
@@ -127,7 +160,6 @@ export default function Home() {
       if (!response.ok) throw new Error(`HTTP error ${response.status}`);
       if (!response.body) throw new Error("ReadableStream not supported by browser.");
 
-      // Read the SSE stream chunk-by-chunk
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
@@ -138,7 +170,7 @@ export default function Home() {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n\n");
-        buffer = lines.pop() || ""; // Keep the incomplete chunk in the buffer
+        buffer = lines.pop() || "";
 
         for (const line of lines) {
           if (line.startsWith("data: ")) {
@@ -167,6 +199,72 @@ export default function Home() {
     }
   };
 
+  const sendChatQuestion = async (questionText: string) => {
+    const trimmed = questionText.trim();
+    if (!trimmed || !data || isChatLoading) return;
+
+    const updatedHistory: ChatMessage[] = [...chatHistory, { role: "user", content: trimmed }];
+    setChatHistory(updatedHistory);
+    setChatInput("");
+    setIsChatLoading(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: trimmed,
+          ticker: data.ticker,
+          company_name: data.company_name,
+          peer_ticker: data.peer_ticker,
+          memo: data.final_memo,
+          quantitative_analysis: data.quantitative_analysis,
+          news_context: data.news_context,
+          chat_history: updatedHistory.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+
+      if (!response.ok) throw new Error(`Chat HTTP error ${response.status}`);
+      const resJson = await response.json();
+
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: resJson.answer || "No response generated.",
+          sourcesCount: resJson.sources_count,
+        },
+      ]);
+    } catch (err) {
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Failed to reach the Interrogation Engine. Check that FastAPI is running.",
+        },
+      ]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const handleChatSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendChatQuestion(chatInput);
+  };
+
+  const handleDownloadMarkdown = () => {
+    if (!data) return;
+    const blob = new Blob([data.final_memo], { type: "text/markdown;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", `${data.ticker}_Investment_Memo.md`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const chartData = (() => {
     if (!data?.market_data?.target?.history_dates) return [];
     const dates = data.market_data.target.history_dates;
@@ -181,7 +279,17 @@ export default function Home() {
   })();
 
   const isTimeSeries = chartData.length > 0;
-  const quant = data ? parseQuantSections(data.quantitative_analysis, data.ticker, data.peer_ticker) : { target: "", peer: "" };
+  const quant = data
+    ? parseQuantSections(data.quantitative_analysis, data.ticker, data.peer_ticker)
+    : { target: "", peer: "" };
+
+  const suggestedPrompts = data
+    ? [
+        `Break down ${data.ticker}'s primary revenue drivers and YoY margin shifts.`,
+        `What are the top 3 existential or regulatory risks in ${data.ticker}'s 10-K?`,
+        `How does ${data.ticker} compare against ${data.peer_ticker || "its peer"} on operating efficiency?`,
+      ]
+    : [];
 
   return (
     <main className="min-h-screen p-6 md:p-12 lg:p-20 flex flex-col items-center">
@@ -200,7 +308,7 @@ export default function Home() {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
           </span>
-          Autonomous Multi-Agent SEC Intelligence Platform
+          Autonomous Multi-Agent SEC Intelligence Platform • JIT Ingestion & Live Interrogation
         </p>
       </motion.div>
 
@@ -216,7 +324,7 @@ export default function Home() {
                 type="text"
                 value={targetInput}
                 onChange={(e) => setTargetInput(e.target.value)}
-                placeholder="Target Company or Ticker (e.g. Apple or AAPL)"
+                placeholder="Target Company or Ticker (e.g. Apple, MSTR, PLTR)"
                 className="h-14 w-full bg-zinc-900/60 rounded-xl border border-transparent pl-11 pr-4 text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500/50 focus:bg-zinc-900 tracking-wide text-sm transition-all"
                 disabled={isAnalyzing}
                 required
@@ -235,7 +343,7 @@ export default function Home() {
                 className="h-14 w-full bg-zinc-900/60 rounded-xl border border-transparent pl-11 pr-36 text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500/50 focus:bg-zinc-900 tracking-wide text-sm transition-all"
                 disabled={isAnalyzing}
               />
-              
+
               <button
                 type="submit"
                 disabled={isAnalyzing || !targetInput.trim()}
@@ -263,37 +371,54 @@ export default function Home() {
         )}
       </div>
 
-      {/* LIVE AGENT TERMINAL (Shows while analyzing) */}
-      {isAnalyzing && !data && (
+      {/* LIVE AGENT TERMINAL (Shows while analyzing or when toggled open) */}
+      {(isAnalyzing || (data && showLogsAfterComplete)) && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-6xl glass-panel p-6 rounded-2xl border border-zinc-800/80 shadow-2xl flex flex-col h-96 font-mono text-sm overflow-hidden"
+          className="w-full max-w-6xl glass-panel p-6 rounded-2xl border border-zinc-800/80 shadow-2xl flex flex-col h-96 font-mono text-sm overflow-hidden mb-8"
         >
-          <div className="flex items-center gap-2 mb-4 border-b border-zinc-800/80 pb-3 text-zinc-500">
-            <Terminal className="w-4 h-4 text-red-500" />
-            <span className="uppercase tracking-widest text-xs">LangGraph Autonomous Execution</span>
+          <div className="flex items-center justify-between mb-4 border-b border-zinc-800/80 pb-3 text-zinc-500">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-red-500" />
+              <span className="uppercase tracking-widest text-xs">
+                LangGraph & JIT Autonomous Execution Log
+              </span>
+            </div>
+            {data && (
+              <button
+                onClick={() => setShowLogsAfterComplete(false)}
+                className="text-xs text-zinc-400 hover:text-white"
+              >
+                Close Logs
+              </button>
+            )}
           </div>
-          
-          <div className="flex-1 overflow-y-auto space-y-3 pb-4 pr-2 custom-scrollbar">
+
+          <div className="flex-1 overflow-y-auto space-y-2.5 pb-4 pr-2 custom-scrollbar">
             {liveLogs.map((log, i) => (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
-                key={i} 
-                className={`text-zinc-300 ${log.includes('[Error]') || log.includes('failed') ? 'text-red-400' : ''} ${log.includes('[Success]') ? 'text-emerald-400' : ''}`}
+                key={i}
+                className={`text-zinc-300 ${
+                  log.includes("[Error]") || log.includes("failed") ? "text-red-400" : ""
+                } ${log.includes("[Success]") ? "text-emerald-400" : ""} ${
+                  log.includes("[JIT") ? "text-amber-300" : ""
+                }`}
               >
-                <span className="text-zinc-600 mr-3 hidden md:inline-block">[{new Date().toLocaleTimeString()}]</span>
+                <span className="text-zinc-600 mr-3 hidden md:inline-block">[{i + 1}]</span>
                 {log}
               </motion.div>
             ))}
-            
-            {/* Blinking cursor / loading indicator */}
-            <div className="flex items-center gap-3 text-zinc-500 mt-4">
-              <Loader2 className="w-4 h-4 animate-spin text-red-500" />
-              <span className="animate-pulse">Awaiting next node execution...</span>
-            </div>
-            
+
+            {isAnalyzing && (
+              <div className="flex items-center gap-3 text-zinc-500 mt-4">
+                <Loader2 className="w-4 h-4 animate-spin text-red-500" />
+                <span className="animate-pulse">Executing autonomous workflow...</span>
+              </div>
+            )}
+
             <div ref={terminalEndRef} />
           </div>
         </motion.div>
@@ -309,18 +434,25 @@ export default function Home() {
           {/* Target KPI Card */}
           <div className="glass-panel p-6 rounded-2xl flex flex-col justify-between">
             <div>
-              <span className="text-xs uppercase tracking-widest text-zinc-500 font-mono">Target Overview</span>
+              <span className="text-xs uppercase tracking-widest text-zinc-500 font-mono">
+                Target Overview
+              </span>
               <h2 className="text-3xl font-bold text-white mt-1">{data.ticker}</h2>
               <p className="text-xs text-zinc-400 mt-1">{data.company_name}</p>
             </div>
             <div className="grid grid-cols-2 gap-4 mt-6">
               <div className="p-4 bg-zinc-950/60 rounded-xl border border-zinc-800/80">
                 <span className="text-xs text-zinc-500 block mb-1">Risk Score</span>
-                <span className="text-2xl font-bold text-red-400">{data.risk_score}<span className="text-xs text-zinc-600">/100</span></span>
+                <span className="text-2xl font-bold text-red-400">
+                  {data.risk_score}
+                  <span className="text-xs text-zinc-600">/100</span>
+                </span>
               </div>
               <div className="p-4 bg-zinc-950/60 rounded-xl border border-zinc-800/80">
-                <span className="text-xs text-zinc-500 block mb-1">Financial Score</span>
-                <span className="text-2xl font-bold text-zinc-200">{Number(data.financial_score).toFixed(4)}</span>
+                <span className="text-xs text-zinc-500 block mb-1">Retrieval Score</span>
+                <span className="text-2xl font-bold text-zinc-200">
+                  {Number(data.financial_score).toFixed(4)}
+                </span>
               </div>
             </div>
           </div>
@@ -343,9 +475,22 @@ export default function Home() {
 
           {/* System Telemetry */}
           <div className="glass-panel p-6 rounded-2xl flex flex-col justify-between">
-            <div className="flex items-center gap-2 text-zinc-500 text-xs uppercase tracking-widest font-mono">
-              <Terminal className="w-4 h-4 text-red-500" />
-              <span>System Telemetry</span>
+            <div className="flex items-center justify-between text-zinc-500 text-xs uppercase tracking-widest font-mono">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-red-500" />
+                <span>System Telemetry</span>
+              </div>
+              <button
+                onClick={() => setShowLogsAfterComplete((prev) => !prev)}
+                className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1"
+              >
+                {showLogsAfterComplete ? "Hide Logs" : `View Logs (${liveLogs.length})`}
+                {showLogsAfterComplete ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
+              </button>
             </div>
             <div className="space-y-3 text-sm text-zinc-300 mt-4">
               <div className="flex justify-between border-b border-zinc-800/60 pb-2">
@@ -354,11 +499,11 @@ export default function Home() {
               </div>
               <div className="flex justify-between border-b border-zinc-800/60 pb-2">
                 <span className="text-zinc-500">Vector Engine:</span>
-                <span className="font-mono text-zinc-200">ChromaDB / EDGAR</span>
+                <span className="font-mono text-zinc-200">ChromaDB + BM25 + HyDE</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-500">LLM Core:</span>
-                <span className="font-mono text-red-400">Gemini 3.5 Flash</span>
+                <span className="text-zinc-500">JIT SEC Engine:</span>
+                <span className="font-mono text-emerald-400">Active</span>
               </div>
             </div>
           </div>
@@ -368,11 +513,11 @@ export default function Home() {
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2 text-white font-semibold text-lg">
                 <BarChart3 className="w-5 h-5 text-red-500" />
-                <span>Market Fundamentals & Price Context</span>
+                <span>Market Fundamentals & 6-Month Price Action</span>
               </div>
               <span className="text-xs font-mono text-zinc-500 uppercase">yFinance Live Stream</span>
             </div>
-            {isTimeSeries && (
+            {isTimeSeries ? (
               <div className="h-[300px] w-full pt-4">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={chartData}>
@@ -384,23 +529,78 @@ export default function Home() {
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
                     <XAxis dataKey="date" stroke="#52525b" fontSize={11} tickLine={false} axisLine={false} />
-                    <YAxis yAxisId="left" stroke="#52525b" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} />
-                    <YAxis yAxisId="right" orientation="right" stroke="#52525b" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} />
-                    <Tooltip contentStyle={{ backgroundColor: "#09090b", borderColor: "#27272a", borderRadius: "8px", fontSize: "12px", color: "#fff" }} itemStyle={{ color: "#fff" }} />
+                    <YAxis
+                      yAxisId="left"
+                      stroke="#52525b"
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                      tickFormatter={(v) => `$${v}`}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      stroke="#52525b"
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                      tickFormatter={(v) => `$${v}`}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#09090b",
+                        borderColor: "#27272a",
+                        borderRadius: "8px",
+                        fontSize: "12px",
+                        color: "#fff",
+                      }}
+                      itemStyle={{ color: "#fff" }}
+                    />
                     <Legend iconType="circle" wrapperStyle={{ fontSize: "12px", paddingTop: "10px" }} />
-                    <Area yAxisId="left" type="monotone" dataKey="targetPrice" name={data.ticker} stroke="#ef4444" strokeWidth={2} fill="url(#redGradient)" />
-                    {data.peer_ticker && <Line yAxisId="right" type="monotone" dataKey="peerPrice" name={data.peer_ticker} stroke="#71717a" strokeWidth={2} dot={false} />}
+                    <Area
+                      yAxisId="left"
+                      type="monotone"
+                      dataKey="targetPrice"
+                      name={data.ticker}
+                      stroke="#ef4444"
+                      strokeWidth={2}
+                      fill="url(#redGradient)"
+                    />
+                    {data.peer_ticker && (
+                      <Line
+                        yAxisId="right"
+                        type="monotone"
+                        dataKey="peerPrice"
+                        name={data.peer_ticker}
+                        stroke="#71717a"
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                    )}
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
+            ) : (
+              <p className="text-xs text-zinc-500 font-mono">
+                Market price history unavailable for {data.ticker}.
+              </p>
             )}
           </div>
 
           {/* Institutional Investment Memorandum */}
           <div className="glass-panel p-8 rounded-2xl md:col-span-3 space-y-4 shadow-xl">
-            <div className="flex items-center gap-2 text-white font-semibold text-lg border-b border-zinc-800 pb-3">
-              <FileText className="w-5 h-5 text-red-500" />
-              <span>Institutional Investment Memorandum</span>
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2 text-white font-semibold text-lg">
+                <FileText className="w-5 h-5 text-red-500" />
+                <span>Institutional Investment Memorandum</span>
+              </div>
+              <button
+                onClick={handleDownloadMarkdown}
+                className="px-3.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 flex items-center gap-2 transition-all"
+              >
+                <Download className="w-3.5 h-3.5 text-red-400" />
+                <span>Export Memo (.MD)</span>
+              </button>
             </div>
             <div className="text-zinc-300">
               <MarkdownBlock content={data.final_memo} />
@@ -440,6 +640,110 @@ export default function Home() {
               </div>
             </div>
           )}
+
+          {/* LIVE INTERROGATION MODE (CHAT ANALYSIS) */}
+          <div className="glass-panel p-8 rounded-2xl md:col-span-3 space-y-6 border border-red-950/40">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-zinc-800 pb-4">
+              <div>
+                <div className="flex items-center gap-2 text-white font-semibold text-lg">
+                  <MessageSquare className="w-5 h-5 text-red-500" />
+                  <span>Live Interrogation Mode — Analyst Q&A</span>
+                </div>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Cross-examine this investment memorandum and query {data.ticker}
+                  {data.peer_ticker ? ` & ${data.peer_ticker}` : ""} SEC 10-K filings directly via hybrid RAG.
+                </p>
+              </div>
+              <span className="text-xs font-mono px-3 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 self-start md:self-auto">
+                RAG + MEMO GROUNDED
+              </span>
+            </div>
+
+            {/* Suggested Quick Prompts */}
+            {chatHistory.length === 0 && (
+              <div className="flex flex-wrap gap-2">
+                {suggestedPrompts.map((prompt, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => sendChatQuestion(prompt)}
+                    className="text-xs bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 hover:border-red-500/40 text-zinc-300 px-3.5 py-2 rounded-xl transition-all text-left"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Chat Message Thread */}
+            <div className="max-h-96 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
+              {chatHistory.map((msg, index) => (
+                <div
+                  key={index}
+                  className={`flex gap-3 p-4 rounded-xl border ${
+                    msg.role === "user"
+                      ? "bg-zinc-900/50 border-zinc-800/80 ml-0 md:ml-12"
+                      : "bg-zinc-950/80 border-zinc-800/60 mr-0 md:mr-12"
+                  }`}
+                >
+                  <div className="mt-0.5 shrink-0">
+                    {msg.role === "user" ? (
+                      <div className="w-7 h-7 rounded-lg bg-zinc-800 flex items-center justify-center">
+                        <User className="w-4 h-4 text-zinc-300" />
+                      </div>
+                    ) : (
+                      <div className="w-7 h-7 rounded-lg bg-red-600/20 border border-red-500/30 flex items-center justify-center">
+                        <Bot className="w-4 h-4 text-red-400" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-mono uppercase text-zinc-500">
+                        {msg.role === "user" ? "Portfolio Manager" : "KORE Analyst Engine"}
+                      </span>
+                      {msg.role === "assistant" && typeof msg.sourcesCount === "number" && (
+                        <span className="text-[11px] font-mono text-emerald-400">
+                          {msg.sourcesCount} SEC chunks verified
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm text-zinc-200">
+                      <MarkdownBlock content={msg.content} />
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {isChatLoading && (
+                <div className="flex items-center gap-3 p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/60 text-zinc-400 text-sm font-mono">
+                  <Loader2 className="w-4 h-4 animate-spin text-red-500" />
+                  <span>Retrieving SEC 10-K tables & synthesizing answer...</span>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Chat Input Bar */}
+            <form onSubmit={handleChatSubmit} className="flex gap-3">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder={`Ask a specific follow-up question about ${data.ticker}'s financials, footnotes, or risks...`}
+                className="h-12 flex-1 bg-zinc-900/70 rounded-xl border border-zinc-800 px-4 text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500/50 text-sm"
+                disabled={isChatLoading}
+              />
+              <button
+                type="submit"
+                disabled={isChatLoading || !chatInput.trim()}
+                className="h-12 px-5 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white rounded-xl flex items-center gap-2 text-sm font-semibold transition-all"
+              >
+                <span>Ask</span>
+                <Send className="w-4 h-4" />
+              </button>
+            </form>
+          </div>
         </motion.div>
       )}
     </main>

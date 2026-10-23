@@ -1,3 +1,6 @@
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
 export async function POST(request: Request) {
   const apiUrl = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8001";
   const upstreamResponse = await fetch(`${apiUrl}/api/analyze`, {
@@ -16,6 +19,7 @@ export async function POST(request: Request) {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }
